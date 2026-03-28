@@ -1,0 +1,8 @@
+{
+  "stage": "export",
+  "status": "done",
+  "output_path": "C:\\Users\\User\\OneDrive\\Desktop\\important\\datacleaning\\adas_pipeline\\output\\final",
+  "completed_at": "2026-03-29T02:28:04.095808",
+  "json_path": "C:\\Users\\User\\OneDrive\\Desktop\\important\\datacleaning\\adas_pipeline\\output\\final\\dataset.json",
+  "csv_path": "C:\\Users\\User\\OneDrive\\Desktop\\important\\datacleaning\\adas_pipeline\\output\\final\\dataset.csv"
+}
