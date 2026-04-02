@@ -100,12 +100,28 @@ def _run_pipeline(job_id: str, video_path: str):
             video_id=Path(video_path).stem,
         )
 
+        # Copy outputs to a job-specific directory so multiple jobs don't overwrite each other
+        job_out_dir = os.path.join(config.OUTPUT_DIR, "jobs", job_id)
+        os.makedirs(job_out_dir, exist_ok=True)
+        job_video = os.path.join(job_out_dir, "annotated_video.mp4")
+        job_json  = os.path.join(job_out_dir, "dataset.json")
+        job_csv   = os.path.join(job_out_dir, "dataset.csv")
+        job_xml   = os.path.join(job_out_dir, "annotations.xml")
+        for src, dst in [
+            (video_out, job_video),
+            (os.path.join(config.FINAL_DIR, config.OUTPUT_JSON_NAME), job_json),
+            (os.path.join(config.FINAL_DIR, config.OUTPUT_CSV_NAME),  job_csv),
+            (xml_out, job_xml),
+        ]:
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+
         jobs[job_id]["status"] = "done"
         jobs[job_id]["result"] = {
-            "video": video_out,
-            "json": os.path.join(config.FINAL_DIR, config.OUTPUT_JSON_NAME),
-            "csv": os.path.join(config.FINAL_DIR, config.OUTPUT_CSV_NAME),
-            "xml": xml_out,
+            "video": job_video,
+            "json":  job_json,
+            "csv":   job_csv,
+            "xml":   job_xml,
         }
         log_q.put("DONE")
 

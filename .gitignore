@@ -8,4 +8,13 @@ output/
 checkpoint.json
 *.log
 .env
+
+# Large data folders — too big for GitHub
+cleaned_dataset/
+data/
 Pedistrian_intent_detection/JAAD/
+Pedistrian_intent_detection/models/
+
+# Pipeline internals
+adas_pipeline/checkpoints/
+adas_pipeline/output/

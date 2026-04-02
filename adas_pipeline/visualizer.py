@@ -161,7 +161,7 @@ def render_video(
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # Try H.264 (browser-compatible) first, fall back to mp4v
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
     if not writer.isOpened():
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
