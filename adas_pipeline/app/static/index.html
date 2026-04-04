@@ -842,10 +842,29 @@ function detectStage(msg){
       setStage(k,'active','Running...');activeStage=k;
     }
   }
-  if(msg.includes('Rendering annotated')){setStage('render','active','Rendering...');activeStage='render';}
-  if(msg.includes('Video saved'))setStage('render','done','Done');
-  if(msg.includes('Generating XML')){setStage('xml','active','Writing...');activeStage='xml';}
-  if(msg.includes('annotations.xml')||msg.includes('XML annotation'))setStage('xml','done','Done');
+  // Catch stage transitions from raw log lines (no [START]/[DONE] markers)
+  const stagePatterns = [
+    ['input_validation',  [/Video validated/,/JAAD validated/]],
+    ['frame_extraction',  [/Extracted \d+ frames/,/frame_extractor:/]],
+    ['frame_cleaning',    [/Frame cleaning:/,/frame_cleaner:/,/Adaptive blur/]],
+    ['detection',         [/Detection complete/,/YOLO model loaded/,/detector:/]],
+    ['tracking',          [/Tracking complete/,/tracker:/]],
+    ['behavior_analysis', [/Behavior distribution/,/behavior_analyzer:/]],
+    ['tagging',           [/Tagging complete/,/tagger:/]],
+    ['export',            [/JSON written/,/CSV written/,/exporter:/]],
+    ['render',            [/Rendering annotated/,/Rendering \d+ frames/,/visualizer:/]],
+    ['xml',               [/Generating XML/,/XML annotation/]],
+  ];
+  for(const [k, patterns] of stagePatterns){
+    if(patterns.some(p=>p.test(msg))){
+      if(!completedStages.has(k)&&activeStage!==k){
+        if(activeStage&&activeStage!==k){setStage(activeStage,'done','Done');completedStages.add(activeStage);}
+        setStage(k,'active','Running...');activeStage=k;
+      }
+    }
+  }
+  if(msg.includes('Video saved')){setStage('render','done','Done');completedStages.add('render');updateProgress(completedStages.size/STAGES.length*100);}
+  if(msg.includes('annotations.xml')||msg.includes('XML written')){setStage('xml','done','Done');completedStages.add('xml');updateProgress(completedStages.size/STAGES.length*100);}
 }
 
 // ── Queue runner ───────────────────────────────────────────────────────

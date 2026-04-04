@@ -160,18 +160,19 @@ def render_video(
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # Try H.264 (browser-compatible) first, fall back to mp4v
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
-    if not writer.isOpened():
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+    # Auto-detect actual frame dimensions from the first readable image
+    for rec in records[:20]:
+        fp = rec.get("file_path")
+        if fp and os.path.exists(fp):
+            tmp = cv2.imread(fp)
+            if tmp is not None:
+                frame_height, frame_width = tmp.shape[:2]
+                break
 
-    if not writer.isOpened():
-        raise RuntimeError(f"Could not open VideoWriter for {output_path}")
+    logger.info(f"Rendering {len(records)} frames -> {output_path}  [{frame_width}x{frame_height}]")
 
-    logger.info(f"Rendering {len(records)} frames -> {output_path}")
-
+    # Build rendered frames list
+    frames = []
     for i, record in enumerate(records):
         frame_id  = record.get("frame_id", i)
         timestamp = record.get("timestamp", "")
@@ -181,26 +182,69 @@ def render_video(
         objects   = record.get("objects") or record.get("detections") or []
 
         img = _load_or_synthetic(file_path, frame_width, frame_height)
-
-        # Resize to target if needed
         if img.shape[1] != frame_width or img.shape[0] != frame_height:
             img = cv2.resize(img, (frame_width, frame_height))
-
-        # Draw detections
         for obj in objects:
             _draw_detection(img, obj)
-
-        # Draw scene banner
         _draw_scene_banner(img, scene_tag, reason, frame_id, timestamp)
-
-        writer.write(img)
+        frames.append(img)
 
         if i % 500 == 0:
             logger.info(f"  Rendered {i}/{len(records)} frames...")
 
-    writer.release()
-    logger.info(f"Video saved: {output_path}")
-    return output_path
+    # ── Encoder waterfall ──────────────────────────────────────────────
+    # 1) PyAV  →  true H.264 MP4, works everywhere, no subprocess
+    # 2) imageio[ffmpeg]  →  H.264 via bundled ffmpeg binary
+    # 3) OpenCV mp4v  →  MPEG-4 MP4 (playable after download, not in browser)
+    def _encode_pyav(frames, output_path, fps, w, h):
+        import av  # noqa: PLC0415
+        container = av.open(output_path, mode="w")
+        stream = container.add_stream("h264", rate=int(fps))
+        stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
+        stream.options = {"crf": "23", "preset": "fast"}
+        for img in frames:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            frm = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+            for pkt in stream.encode(frm):
+                container.mux(pkt)
+        for pkt in stream.encode(None):
+            container.mux(pkt)
+        container.close()
+
+    def _encode_imageio(frames, output_path, fps, w, h):
+        import imageio  # noqa: PLC0415
+        writer = imageio.get_writer(output_path, fps=fps, codec="libx264",
+                                    quality=None,
+                                    output_params=["-crf", "23", "-preset", "fast",
+                                                   "-pix_fmt", "yuv420p"])
+        for img in frames:
+            writer.append_data(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        writer.close()
+
+    def _encode_opencv(frames, output_path, fps, w, h):
+        wr = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        if not wr.isOpened():
+            raise RuntimeError("OpenCV VideoWriter failed")
+        for img in frames:
+            wr.write(img)
+        wr.release()
+
+    encoders = [
+        ("PyAV H.264",      _encode_pyav),
+        ("imageio H.264",   _encode_imageio),
+        ("OpenCV mp4v",     _encode_opencv),
+    ]
+
+    for name, fn in encoders:
+        try:
+            fn(frames, output_path, fps, frame_width, frame_height)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 500:
+                logger.info(f"Video saved ({name}): {output_path}")
+                return output_path
+        except Exception as e:
+            logger.warning(f"Encoder '{name}' failed: {e} — trying next...")
+
+    raise RuntimeError("All video encoders failed. Check that av, imageio[ffmpeg], or OpenCV is installed.")
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

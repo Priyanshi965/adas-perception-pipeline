@@ -82,14 +82,14 @@ def _run_pipeline(job_id: str, video_path: str):
         context = {"mode": "video", "video_path": video_path}
         runner.run(context)
 
-        # Render annotated video
+        # Render annotated video — capture actual output path (may be .avi if ffmpeg unavailable)
         log_q.put("INFO: Rendering annotated video...")
-        video_out = os.path.join(config.FINAL_DIR, "annotated_video.mp4")
-        visualizer.render_video(
+        video_out = visualizer.render_video(
             dataset_path=os.path.join(config.FINAL_DIR, config.OUTPUT_JSON_NAME),
-            output_path=video_out,
+            output_path=os.path.join(config.FINAL_DIR, "annotated_video.mp4"),
             fps=30.0,
         )
+        log_q.put("INFO: Video saved")
 
         # Generate XML
         log_q.put("INFO: Generating XML annotations...")
@@ -99,11 +99,12 @@ def _run_pipeline(job_id: str, video_path: str):
             output_xml_path=xml_out,
             video_id=Path(video_path).stem,
         )
+        log_q.put(f"INFO: XML written: {xml_out}")
 
         # Copy outputs to a job-specific directory so multiple jobs don't overwrite each other
         job_out_dir = os.path.join(config.OUTPUT_DIR, "jobs", job_id)
         os.makedirs(job_out_dir, exist_ok=True)
-        job_video = os.path.join(job_out_dir, "annotated_video.mp4")
+        job_video = os.path.join(job_out_dir, os.path.basename(video_out))
         job_json  = os.path.join(job_out_dir, "dataset.json")
         job_csv   = os.path.join(job_out_dir, "dataset.csv")
         job_xml   = os.path.join(job_out_dir, "annotations.xml")
@@ -218,6 +219,7 @@ async def stream_video(job_id: str, request: Request):
         raise HTTPException(404, "Video file not found")
 
     file_size = os.path.getsize(file_path)
+    mime = "video/mp4" if file_path.endswith(".mp4") else "video/x-msvideo"
     range_header = request.headers.get("range")
 
     if range_header:
@@ -241,7 +243,7 @@ async def stream_video(job_id: str, request: Request):
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Accept-Ranges": "bytes",
             "Content-Length": str(chunk_size),
-            "Content-Type": "video/mp4",
+            "Content-Type": mime,
         }
         return StreamingResponse(iter_file(), status_code=206, headers=headers)
 
@@ -252,7 +254,7 @@ async def stream_video(job_id: str, request: Request):
 
     return StreamingResponse(
         iter_full(),
-        media_type="video/mp4",
+        media_type=mime,
         headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
     )
 
