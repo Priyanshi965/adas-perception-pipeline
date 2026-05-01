@@ -1,8 +1,28 @@
 """
-frame_cleaner.py — Filters out blurry, dark, and corrupted frames.
+frame_cleaner.py — Filters and preprocesses video frames for ADAS analysis.
 
-Frames that pass are copied to output/clean_frames/.
-Returns a filtered list of frame records.
+Pipeline per frame:
+  1. Reject corrupted / unreadable frames
+  2. Reject blurry frames (adaptive Laplacian threshold)
+  3. Reject too-dark frames
+  4. Perceptual-hash deduplication (remove near-identical frames)
+  5. Gaussian denoising (reduce sensor/compression noise)
+  6. CLAHE lighting normalisation (equalise contrast across day/night/tunnel)
+  7. Copy cleaned frame to output/clean_frames/
+
+WHY each step matters for behaviour analysis
+─────────────────────────────────────────────
+• Blur rejection        → blurry frames produce noisy bounding-box edges that
+                          confuse trackers and inflate displacement vectors.
+• Dark rejection        → detectors trained on bright imagery fail in very dark
+                          frames, generating false-negatives that break tracks.
+• Deduplication         → consecutive frames < 1% different carry no new motion
+                          signal but add O(n) cost to every downstream stage.
+• Gaussian denoising    → impulse/Gaussian sensor noise shifts bbox centroids
+                          frame-to-frame, creating phantom velocity signals.
+• CLAHE normalisation   → uneven illumination (headlights, shadows, tunnels)
+                          causes confidence drops; normalising contrast lets the
+                          detector operate at a stable operating point.
 """
 
 import logging
@@ -18,67 +38,33 @@ import config
 logger = logging.getLogger("frame_cleaner")
 
 
-def is_blurry(gray: np.ndarray) -> bool:
-    """Laplacian variance below threshold → blurry."""
-    return cv2.Laplacian(gray, cv2.CV_64F).var() < config.BLUR_THRESHOLD
+# ─── Quality checks ───────────────────────────────────────────────────────────
+
+def is_blurry(gray: np.ndarray, threshold: float) -> bool:
+    return cv2.Laplacian(gray, cv2.CV_64F).var() < threshold
 
 
 def is_dark(gray: np.ndarray) -> bool:
-    """Mean pixel brightness below threshold → too dark."""
     return float(gray.mean()) < config.BRIGHTNESS_THRESHOLD
 
 
 def is_corrupted(frame: np.ndarray) -> bool:
-    """
-    All-black or all-white frame → likely corrupted / blank.
-    Uses the saturation ratio threshold from config.
-    """
-    total_pixels = frame.shape[0] * frame.shape[1]
-    black_pixels = int(np.sum(np.all(frame == 0, axis=2)))
-    white_pixels = int(np.sum(np.all(frame == 255, axis=2)))
-    ratio = (black_pixels + white_pixels) / total_pixels
-    return ratio > config.CORRUPTION_SATURATION_RATIO
+    total = frame.shape[0] * frame.shape[1]
+    black = int(np.sum(np.all(frame == 0, axis=2)))
+    white = int(np.sum(np.all(frame == 255, axis=2)))
+    return (black + white) / total > config.CORRUPTION_SATURATION_RATIO
 
 
-def clean_frame(record: Dict) -> Tuple[bool, str]:
-    """
-    Check a single frame record. Return (passes, reject_reason).
-
-    For annotation-only records (file_path is None) we skip image checks
-    and pass them through — JAAD annotations are still useful.
-    """
-    if record.get("file_path") is None:
-        return True, ""
-
-    path = record["file_path"]
-    if not os.path.exists(path):
-        return False, "file_missing"
-
-    frame = cv2.imread(path)
-    if frame is None:
-        return False, "opencv_decode_fail"
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    if is_corrupted(frame):
-        return False, "corrupted"
-    if is_blurry(gray):
-        return False, f"blurry (var={cv2.Laplacian(gray, cv2.CV_64F).var():.1f})"
-    if is_dark(gray):
-        return False, f"dark (mean={gray.mean():.1f})"
-
-    return True, ""
-
+# ─── Adaptive blur threshold ──────────────────────────────────────────────────
 
 def _adaptive_blur_threshold(records: List[Dict]) -> float:
     """
-    Compute an adaptive blur threshold from the actual frame data.
-    Uses the 20th percentile of Laplacian variances so we never remove
-    more than ~20% of frames purely due to blur, even on low-quality video.
-    Falls back to config.BLUR_THRESHOLD if frames can't be read.
+    Sample up to 200 frames to compute the 20th-percentile Laplacian variance.
+    Using a fixed threshold on degraded footage would wipe out entire videos;
+    the adaptive approach never removes more than ~20 % of frames purely for blur.
     """
     variances = []
-    for record in records[:200]:  # sample first 200 frames
+    for record in records[:200]:
         path = record.get("file_path")
         if not path or not os.path.exists(path):
             continue
@@ -93,7 +79,6 @@ def _adaptive_blur_threshold(records: List[Dict]) -> float:
 
     variances.sort()
     p20 = variances[int(len(variances) * 0.20)]
-    # Use the lower of: config threshold OR 20th-percentile (adaptive)
     threshold = min(config.BLUR_THRESHOLD, p20 * 0.5)
     logger.info(
         f"Adaptive blur threshold: {threshold:.1f} "
@@ -102,24 +87,79 @@ def _adaptive_blur_threshold(records: List[Dict]) -> float:
     return threshold
 
 
+# ─── Perceptual-hash deduplication ────────────────────────────────────────────
+
+def _phash(gray: np.ndarray, size: int = 16) -> np.ndarray:
+    """
+    Compute a difference-hash (dHash) of the frame.
+    Resize to (size+1) x size, then compare adjacent pixels row-by-row
+    to produce a size*size bit vector.  Hamming distance < threshold → duplicate.
+    """
+    resized = cv2.resize(gray, (size + 1, size), interpolation=cv2.INTER_AREA)
+    diff = resized[:, 1:] > resized[:, :-1]   # shape (size, size) bool
+    return diff.flatten()
+
+
+def _hamming(a: np.ndarray, b: np.ndarray) -> int:
+    return int(np.count_nonzero(a != b))
+
+
+# ─── Enhancement ──────────────────────────────────────────────────────────────
+
+def denoise(frame: np.ndarray) -> np.ndarray:
+    """
+    Gaussian denoising with a 3×3 kernel (σ=1).
+    Keeps edges sharp enough for detection while suppressing high-frequency
+    sensor noise that perturbs bbox centroid estimates.
+    """
+    return cv2.GaussianBlur(frame, (3, 3), sigmaX=1.0)
+
+
+def clahe_normalise(frame: np.ndarray) -> np.ndarray:
+    """
+    CLAHE (Contrast Limited Adaptive Histogram Equalisation) on the L channel
+    of LAB colour space.  Clip limit=2.0 prevents over-amplification of flat
+    regions while significantly boosting contrast in under/over-exposed areas.
+    """
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=config.CLAHE_CLIP_LIMIT,
+                             tileGridSize=config.CLAHE_TILE_SIZE)
+    l_eq = clahe.apply(l_ch)
+    lab_eq = cv2.merge([l_eq, a_ch, b_ch])
+    return cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
+
+
+# ─── Main cleaning function ───────────────────────────────────────────────────
+
 def clean_frames(records: List[Dict]) -> List[Dict]:
     """
-    Filter the list of frame records. Copy passing frames to clean_frames/.
-    Returns only records that passed cleaning (with updated file_path).
+    Filter and preprocess frame records.
+    Returns only records that passed all quality checks (with updated file_path
+    pointing to the processed image in output/clean_frames/).
     """
     os.makedirs(config.CLEAN_FRAMES_DIR, exist_ok=True)
 
-    # Use adaptive threshold to avoid wiping out entire videos
     blur_threshold = _adaptive_blur_threshold(records)
 
-    passed = []
-    stats = {"blurry": 0, "dark": 0, "corrupted": 0, "file_missing": 0, "opencv_decode_fail": 0}
+    passed: List[Dict] = []
+    stats = {
+        "blurry": 0, "dark": 0, "corrupted": 0,
+        "file_missing": 0, "opencv_decode_fail": 0, "duplicate": 0,
+    }
     total = len(records)
+
+    # Rolling hash buffer for deduplication (last N hashes)
+    last_hash: np.ndarray | None = None
 
     for i, record in enumerate(records):
         if i % 500 == 0 and i > 0:
-            logger.info(f"  Cleaning progress: {i}/{total} frames ({len(passed)} passed so far)")
+            logger.info(
+                f"  Cleaning progress: {i}/{total} "
+                f"({len(passed)} passed, {stats})"
+            )
 
+        # Annotation-only records (JAAD without video frames) pass through
         path = record.get("file_path")
         if path is None:
             passed.append(record)
@@ -136,6 +176,7 @@ def clean_frames(records: List[Dict]) -> List[Dict]:
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # ── Quality gates ──────────────────────────────────────────────
         if is_corrupted(frame):
             stats["corrupted"] += 1
             continue
@@ -146,12 +187,24 @@ def clean_frames(records: List[Dict]) -> List[Dict]:
             stats["dark"] += 1
             continue
 
-        src = path
-        dst = os.path.join(config.CLEAN_FRAMES_DIR, os.path.basename(src))
-        shutil.copy2(src, dst)
+        # ── Perceptual-hash deduplication ──────────────────────────────
+        h = _phash(gray)
+        if last_hash is not None:
+            hamming = _hamming(h, last_hash)
+            if hamming < config.DUPLICATE_HASH_THRESHOLD:
+                stats["duplicate"] += 1
+                continue
+        last_hash = h
+
+        # ── Preprocessing ──────────────────────────────────────────────
+        processed = denoise(frame)
+        processed = clahe_normalise(processed)
+
+        # ── Save ───────────────────────────────────────────────────────
+        dst = os.path.join(config.CLEAN_FRAMES_DIR, os.path.basename(path))
+        cv2.imwrite(dst, processed, [cv2.IMWRITE_JPEG_QUALITY, config.FRAME_QUALITY])
         passed.append({**record, "file_path": dst})
 
-    total = len(records)
     removed = total - len(passed)
     logger.info(
         f"Frame cleaning: {len(passed)}/{total} passed "

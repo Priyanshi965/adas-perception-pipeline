@@ -197,5 +197,6 @@ class PipelineRunner:
         for name, _ in self.stages:
             for path in (_checkpoint_path(name), _sidecar_path(name)):
                 if os.path.exists(path):
-                    os.remove(path)
-                    self.logger.info(f"Cleared checkpoint: {os.path.basename(path)}")
+                    try:
+                        os.remove(path)
+                        self.logger.info(f"Cleared checkp

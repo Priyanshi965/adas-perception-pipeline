@@ -1,16 +1,20 @@
 """
-tracker.py — Assigns consistent track IDs to objects across frames.
+tracker.py — Assigns consistent track IDs across frames using pre-computed detections.
 
-Two modes controlled by config.USE_BYTETRACK:
-  True  → Use ByteTrack via ultralytics (re-runs detection with tracking)
-  False → Simple IoU-based tracker (no extra dependencies)
+IMPORTANT: This tracker NEVER re-runs YOLO. It works entirely on the bounding
+boxes produced by Stage 4 (detector.py). Re-running detection at this stage is
+the #1 cause of hour-long pipeline hangs on large datasets.
 
-For JAAD annotation-only mode the pedestrian ped_id from the XML is used
-directly as the track_id, which is the most reliable option.
+Two modes (config.USE_BYTETRACK):
+  True  → ByteSort: IoU + confidence-weighted cost matrix (ByteTrack-style logic,
+           no subprocess, no extra model load, O(D²) per frame)
+  False → SimpleIoU: greedy O(D²) IoU matching (fastest, good enough for JAAD)
+
+JAAD annotation-only frames bypass both trackers — the XML ped_id is used
+directly as track_id (most reliable, zero cost).
 """
 
 import logging
-import os
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -22,191 +26,268 @@ logger = logging.getLogger("tracker")
 
 # ─── IoU helper ───────────────────────────────────────────────────────────────
 
-def _iou(boxA: List[int], boxB: List[int]) -> float:
-    """Compute IoU between two [x, y, w, h] boxes."""
-    ax, ay, aw, ah = boxA
-    bx, by, bw, bh = boxB
-
+def _iou(a: List[int], b: List[int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
     ax2, ay2 = ax + aw, ay + ah
     bx2, by2 = bx + bw, by + bh
-
-    inter_x1 = max(ax, bx)
-    inter_y1 = max(ay, by)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-
-    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+    ix1, iy1 = max(ax, bx), max(ay, by)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
         return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
 
-    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-    area_a = aw * ah
-    area_b = bw * bh
-    union_area = area_a + area_b - inter_area
-    return inter_area / union_area if union_area > 0 else 0.0
+
+# ─── Hungarian assignment (pure NumPy, no scipy needed) ──────────────────────
+
+def _greedy_match(cost: np.ndarray, threshold: float) -> List[Tuple[int, int]]:
+    """
+    Greedy matching: repeatedly pick the lowest-cost (row, col) pair.
+    O(n²) — fast for typical detection counts (<200 per frame).
+    Returns list of (det_idx, track_idx) pairs with cost < threshold.
+    """
+    used_rows, used_cols = set(), set()
+    pairs = []
+    indices = np.dstack(np.unravel_index(np.argsort(cost, axis=None), cost.shape))[0]
+    for r, c in indices:
+        if cost[r, c] >= threshold:
+            break
+        if r in used_rows or c in used_cols:
+            continue
+        pairs.append((int(r), int(c)))
+        used_rows.add(r)
+        used_cols.add(c)
+    return pairs
 
 
 # ─── Simple IoU tracker ───────────────────────────────────────────────────────
 
 class SimpleIoUTracker:
-    """
-    Greedy IoU tracker — assigns IDs to objects across consecutive frames.
-    """
+    """Greedy IoU tracker — fast, zero dependencies."""
 
     def __init__(self):
-        self.next_id: Dict[str, int] = {}   # label → next int ID
-        self.active: List[Dict] = []         # last frame's tracked objects
-        self.age: Dict[str, int] = {}        # track_id → frames since seen
+        self._next: Dict[str, int] = {}
+        self._active: List[Dict]   = []
+        self._age: Dict[str, int]  = {}
 
     def _new_id(self, label: str) -> str:
         prefix = "Person" if label == "pedestrian" else "Car"
-        idx = self.next_id.get(prefix, 0)
-        self.next_id[prefix] = idx + 1
+        idx = self._next.get(prefix, 0)
+        self._next[prefix] = idx + 1
         return f"{prefix}_{idx}"
 
     def update(self, detections: List[Dict]) -> List[Dict]:
-        """Match detections to existing tracks and return enriched list."""
-        matched_ids: Dict[int, str] = {}  # det index → track_id
-        used_tracks = set()
+        if not detections:
+            for p in self._active:
+                self._age[p["track_id"]] = self._age.get(p["track_id"], 0) + 1
+            self._active = [
+                p for p in self._active
+                if self._age.get(p["track_id"], 0) < config.MAX_TRACK_AGE
+            ]
+            return []
 
-        for det_idx, det in enumerate(detections):
-            best_iou = config.IOU_MATCH_THRESHOLD
-            best_track_id = None
+        if not self._active:
+            result = [{**d, "track_id": self._new_id(d["label"])} for d in detections]
+            self._active = result[:]
+            return result
 
-            for prev in self.active:
-                if prev["label"] != det["label"]:
-                    continue
-                if prev["track_id"] in used_tracks:
-                    continue
-                iou = _iou(det["bbox"], prev["bbox"])
-                if iou > best_iou:
-                    best_iou = iou
-                    best_track_id = prev["track_id"]
+        n_d, n_t = len(detections), len(self._active)
+        cost = np.ones((n_d, n_t), dtype=np.float32)
+        for i, det in enumerate(detections):
+            for j, trk in enumerate(self._active):
+                if det["label"] == trk["label"]:
+                    cost[i, j] = 1.0 - _iou(det["bbox"], trk["bbox"])
 
-            if best_track_id:
-                matched_ids[det_idx] = best_track_id
-                used_tracks.add(best_track_id)
-            else:
-                matched_ids[det_idx] = self._new_id(det["label"])
+        threshold = 1.0 - config.IOU_MATCH_THRESHOLD
+        pairs = _greedy_match(cost, threshold)
 
-        # Age out old tracks
-        new_active = []
-        for prev in self.active:
-            if prev["track_id"] not in used_tracks:
-                self.age[prev["track_id"]] = self.age.get(prev["track_id"], 0) + 1
-            else:
-                self.age[prev["track_id"]] = 0
+        matched_det  = {r for r, _ in pairs}
+        matched_trk  = {c for _, c in pairs}
+        det_to_track = {r: self._active[c]["track_id"] for r, c in pairs}
 
-        # Build enriched detections and new active list
         result = []
-        for det_idx, det in enumerate(detections):
-            track_id = matched_ids[det_idx]
-            enriched = {**det, "track_id": track_id}
-            result.append(enriched)
-            new_active.append(enriched)
-            self.age[track_id] = 0
+        for i, det in enumerate(detections):
+            tid = det_to_track.get(i, self._new_id(det["label"]))
+            result.append({**det, "track_id": tid})
+            self._age[tid] = 0
 
-        # Keep tracks that are still "alive" (not aged out)
-        surviving = [
-            p for p in self.active
-            if self.age.get(p["track_id"], 0) < config.MAX_TRACK_AGE
-            and p["track_id"] not in {r["track_id"] for r in result}
+        for j, trk in enumerate(self._active):
+            if j not in matched_trk:
+                tid = trk["track_id"]
+                self._age[tid] = self._age.get(tid, 0) + 1
+
+        self._active = result + [
+            p for p in self._active
+            if self._active.index(p) not in matched_trk
+            and self._age.get(p["track_id"], 0) < config.MAX_TRACK_AGE
         ]
-        self.active = result + surviving
+        seen = {r["track_id"] for r in result}
+        self._active = result + [p for p in self._active if p["track_id"] not in seen]
         return result
 
 
-# ─── ByteTrack mode ───────────────────────────────────────────────────────────
+# ─── ByteSort (ByteTrack-style, using pre-computed confidences) ───────────────
 
-def _track_with_bytetrack(records: List[Dict]) -> List[Dict]:
+class ByteSortTracker:
     """
-    Re-run detection with ByteTrack enabled on each frame image.
-    Falls back to SimpleIoUTracker if no image is available.
+    ByteTrack-inspired tracker that uses pre-computed detection boxes + scores.
+    High-confidence (>= conf_high) detections are matched first; low-confidence
+    detections are used for a second-pass recovery of lost tracks.
+    No YOLO re-run — works entirely on the bboxes from Stage 4.
     """
-    from ultralytics import YOLO
 
-    model_path = config.YOLO_MODEL_PATH
-    if not os.path.exists(model_path):
-        model_path = config.YOLO_MODEL_FALLBACK
-    model = YOLO(model_path)
+    def __init__(
+        self,
+        conf_high: float = 0.6,
+        conf_low:  float = 0.1,
+        iou_thresh: float = None,
+        max_age:    int   = None,
+    ):
+        self.conf_high  = conf_high
+        self.conf_low   = conf_low
+        self.iou_thresh = iou_thresh or config.IOU_MATCH_THRESHOLD
+        self.max_age    = max_age    or config.MAX_TRACK_AGE
+        self._next: Dict[str, int] = {}
+        self._tracks: List[Dict]   = []
 
-    iou_tracker = SimpleIoUTracker()  # fallback for annotation-only frames
-    enriched = []
+    def _new_id(self, label: str) -> str:
+        prefix = "Person" if label == "pedestrian" else "Car"
+        idx = self._next.get(prefix, 0)
+        self._next[prefix] = idx + 1
+        return f"{prefix}_{idx}"
 
-    for record in records:
-        frame_id = record["frame_id"]
-        file_path = record.get("file_path")
+    def _match(self, dets: List[Dict]) -> Tuple[Dict[int, str], List[int]]:
+        if not self._tracks or not dets:
+            return {}, list(range(len(dets)))
 
-        if file_path and os.path.exists(file_path):
-            results = model.track(
-                source=file_path,
-                conf=config.DETECTION_CONFIDENCE,
-                classes=list(config.TARGET_CLASS_IDS),
-                persist=True,
-                verbose=False,
-            )
-            detections = _parse_bytetrack_results(results)
+        cost = np.ones((len(dets), len(self._tracks)), dtype=np.float32)
+        for i, d in enumerate(dets):
+            for j, t in enumerate(self._tracks):
+                if d["label"] == t["label"]:
+                    cost[i, j] = 1.0 - _iou(d["bbox"], t["bbox"])
+
+        threshold = 1.0 - self.iou_thresh
+        pairs = _greedy_match(cost, threshold)
+        matched_det = {r: self._tracks[c]["track_id"] for r, c in pairs}
+        unmatched   = [i for i in range(len(dets)) if i not in matched_det]
+        matched_trk = {c for _, c in pairs}
+
+        for j, trk in enumerate(self._tracks):
+            if j not in matched_trk:
+                trk["age"] = trk.get("age", 0) + 1
+
+        return matched_det, unmatched
+
+    def update(self, detections: List[Dict]) -> List[Dict]:
+        high = [d for d in detections if d.get("confidence", 1.0) >= self.conf_high]
+        low  = [d for d in detections if d.get("confidence", 1.0) <  self.conf_high
+                                      and d.get("confidence", 1.0) >= self.conf_low]
+
+        matched, unmatched_high = self._match(high)
+        result: List[Dict] = []
+        matched_tids = set()
+
+        for i, det in enumerate(high):
+            tid = matched.get(i, self._new_id(det["label"]))
+            result.append({**det, "track_id": tid})
+            matched_tids.add(tid)
+
+        lost_tracks = [t for t in self._tracks if t["track_id"] not in matched_tids]
+        if low and lost_tracks:
+            cost2 = np.ones((len(low), len(lost_tracks)), dtype=np.float32)
+            for i, d in enumerate(low):
+                for j, t in enumerate(lost_tracks):
+                    if d["label"] == t["label"]:
+                        cost2[i, j] = 1.0 - _iou(d["bbox"], t["bbox"])
+            pairs2 = _greedy_match(cost2, 1.0 - self.iou_thresh)
+            low_matched = {r: lost_tracks[c]["track_id"] for r, c in pairs2}
+            for i, det in enumerate(low):
+                if i in low_matched:
+                    tid = low_matched[i]
+                    result.append({**det, "track_id": tid})
+                    matched_tids.add(tid)
+
+        new_tracks = []
+        for r in result:
+            new_tracks.append({
+                "track_id": r["track_id"],
+                "bbox":     r["bbox"],
+                "label":    r["label"],
+                "conf":     r.get("confidence", 1.0),
+                "age":      0,
+            })
+        for t in self._tracks:
+            if t["track_id"] not in matched_tids and t.get("age", 0) < self.max_age:
+                new_tracks.append(t)
+
+        self._tracks = new_tracks
+        return result
+
+
+# ─── JAAD helper ──────────────────────────────────────────────────────────────
+
+def _assign_jaad_ids(detections: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """Split detections into those with a JAAD ped_id (track assigned) and those without."""
+    with_id, without_id = [], []
+    for det in detections:
+        ped_id = det.get("ped_id")
+        if ped_id:
+            prefix = "Person" if det.get("label") == "pedestrian" else "Car"
+            with_id.append({**det, "track_id": f"{prefix}_{ped_id}"})
+        elif det.get("track_id"):
+            with_id.append(det)
         else:
-            # No image — use annotation IDs from JAAD or IoU tracker
-            detections = _assign_jaad_track_ids(record.get("detections", []))
-            if not any("track_id" in d for d in detections):
-                detections = iou_tracker.update(detections)
+            without_id.append(det)
+    return with_id, without_id
 
-        enriched.append({**record, "detections": detections})
+
+# ─── Main tracking function ───────────────────────────────────────────────────
+
+def _run_tracker(records: List[Dict], use_bytetrack: bool) -> List[Dict]:
+    tracker = ByteSortTracker() if use_bytetrack else SimpleIoUTracker()
+    enriched = []
+    total = len(records)
+
+    for i, record in enumerate(records):
+        if i % 1000 == 0 and i > 0:
+            logger.info(f"  Tracking progress: {i}/{total} frames")
+
+        raw_dets = record.get("detections", [])
+
+        already_tracked = []
+        needs_tracking  = []
+        for det in raw_dets:
+            ped_id = det.get("ped_id")
+            if ped_id:
+                prefix = "Person" if det.get("label") == "pedestrian" else "Car"
+                already_tracked.append({**det, "track_id": f"{prefix}_{ped_id}"})
+            elif det.get("track_id"):
+                already_tracked.append(det)
+            else:
+                needs_tracking.append(det)
+
+        if needs_tracking:
+            tracked = tracker.update(needs_tracking)
+        else:
+            tracked = []
+
+        enriched.append({
+            **record,
+            "detections": already_tracked + tracked,
+        })
 
     return enriched
 
 
-def _parse_bytetrack_results(results) -> List[Dict]:
-    detections = []
-    for result in results:
-        boxes = result.boxes
-        if boxes is None:
-            continue
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            if cls_id not in config.TARGET_CLASS_IDS:
-                continue
-            track_id = int(box.id[0]) if box.id is not None else -1
-            prefix = "Person" if cls_id in config.PEDESTRIAN_CLASS_IDS else "Car"
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-            label = "pedestrian" if cls_id in config.PEDESTRIAN_CLASS_IDS else "vehicle"
-            detections.append(
-                {
-                    "label": label,
-                    "class_id": cls_id,
-                    "bbox": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
-                    "confidence": round(float(box.conf[0]), 4),
-                    "track_id": f"{prefix}_{track_id}",
-                }
-            )
-    return detections
-
-
-def _assign_jaad_track_ids(detections: List[Dict]) -> List[Dict]:
-    """Use JAAD ped_id as track_id for annotation-only detections."""
-    result = []
-    for det in detections:
-        ped_id = det.get("ped_id")
-        if ped_id:
-            prefix = "Person" if det["label"] == "pedestrian" else "Car"
-            track_id = f"{prefix}_{ped_id}"
-        else:
-            track_id = None  # will be filled by IoU tracker
-        result.append({**det, "track_id": track_id})
-    return result
-
-
-# ─── Track history builder ────────────────────────────────────────────────────
+# ─── Track history ────────────────────────────────────────────────────────────
 
 def build_track_history(records: List[Dict]) -> Dict[str, List]:
-    """
-    Returns { track_id: [(frame_id, bbox, timestamp), ...] }
-    across all frame records.
-    """
     history: Dict[str, List] = {}
     for record in records:
         fid = record["frame_id"]
-        ts = record.get("timestamp", "")
+        ts  = record.get("timestamp", "")
         for det in record.get("detections", []):
             tid = det.get("track_id")
             if tid:
@@ -219,37 +300,22 @@ def build_track_history(records: List[Dict]) -> Dict[str, List]:
 def run(context: dict) -> dict:
     records = context["frame_records"]
 
-    if config.USE_BYTETRACK:
-        try:
-            logger.info("Using ByteTrack tracker")
-            enriched = _track_with_bytetrack(records)
-        except Exception as e:
-            logger.warning(f"ByteTrack failed ({e}), falling back to IoU tracker")
-            enriched = _run_iou_tracker(records)
-    else:
-        logger.info("Using simple IoU tracker")
-        enriched = _run_iou_tracker(records)
+    mode = "ByteSort" if config.USE_BYTETRACK else "Simple IoU"
+    logger.info(f"Using {mode} tracker on {len(records)} frames "
+                f"(pre-computed detections - no YOLO re-run)")
 
+    enriched      = _run_tracker(records, config.USE_BYTETRACK)
     track_history = build_track_history(enriched)
-    logger.info(f"Tracking complete: {len(track_history)} unique tracks")
+
+    n_pedestrian = sum(1 for tid in track_history if tid.startswith("Person"))
+    n_vehicle    = sum(1 for tid in track_history if not tid.startswith("Person"))
+    logger.info(
+        f"Tracking complete: {len(track_history)} unique tracks "
+        f"({n_pedestrian} pedestrian, {n_vehicle} vehicle)"
+    )
 
     return {
         "frame_records": enriched,
         "track_history": track_history,
-        "output_path": config.ANNOTATIONS_DIR,
+        "output_path":   config.ANNOTATIONS_DIR,
     }
-
-
-def _run_iou_tracker(records: List[Dict]) -> List[Dict]:
-    tracker = SimpleIoUTracker()
-    enriched = []
-    for record in records:
-        dets = record.get("detections", [])
-        # Use JAAD IDs if available
-        dets = _assign_jaad_track_ids(dets)
-        # Fill in any missing track_ids with IoU tracker
-        needs_tracking = [d for d in dets if not d.get("track_id")]
-        already_tracked = [d for d in dets if d.get("track_id")]
-        tracked_new = tracker.update(needs_tracking)
-        enriched.append({**record, "detections": already_tracked + tracked_new})
-    return enriched

@@ -631,6 +631,7 @@ const STAGES=[
   {key:'detection',         label:'Object Detection',  char:'eye'},
   {key:'tracking',          label:'ByteTrack',         char:'runner'},
   {key:'behavior_analysis', label:'Behavior Analysis', char:'brain'},
+  {key:'intent_prediction', label:'Intent Prediction', char:'brain'},
   {key:'tagging',           label:'Safety Tagging',    char:'knight'},
   {key:'export',            label:'Export',            char:'boxes'},
   {key:'render',            label:'Render Video',      char:'camera'},
@@ -850,6 +851,7 @@ function detectStage(msg){
     ['detection',         [/Detection complete/,/YOLO model loaded/,/detector:/]],
     ['tracking',          [/Tracking complete/,/tracker:/]],
     ['behavior_analysis', [/Behavior distribution/,/behavior_analyzer:/]],
+    ['intent_prediction', [/Intent prediction complete/,/intent_predictor:/,/Intent model/]],
     ['tagging',           [/Tagging complete/,/tagger:/]],
     ['export',            [/JSON written/,/CSV written/,/exporter:/]],
     ['render',            [/Rendering annotated/,/Rendering \d+ frames/,/visualizer:/]],
@@ -989,8 +991,15 @@ async function appendResultCard(jobId,filename){
     <div class="res-body">
       ${buildStatsHtml(tf,to,df,sf,jobId)}
       ${buildTimelineHtml(frameData,jobId)}
-      <div class="vid-wrap">
-        <video id="vid-${jobId}" controls style="width:100%;display:block"></video>
+      <div class="vid-wrap" style="position:relative">
+        <video id="vid-${jobId}" controls preload="auto" playsinline
+               style="width:100%;display:block;background:#000;min-height:160px">
+        </video>
+        <div id="verr-${jobId}" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:rgba(5,10,20,.85);flex-direction:column;gap:10px;padding:20px;text-align:center">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <div id="verrmsg-${jobId}" style="font-family:'Share Tech Mono',monospace;font-size:.72rem;color:var(--red)"></div>
+          <a href="/download/${jobId}/video" download style="font-family:'Orbitron',sans-serif;font-size:.6rem;letter-spacing:2px;color:var(--cyan);border:1px solid var(--cyan);padding:6px 16px;border-radius:8px;text-decoration:none">DOWNLOAD MP4 INSTEAD</a>
+        </div>
         <div class="vid-ovl"><span class="vid-fnum" id="vfn-${jobId}">FRAME —</span></div>
         <div class="dmeter"><div class="dm-fill"></div></div>
       </div>
@@ -1004,9 +1013,30 @@ async function appendResultCard(jobId,filename){
 
   // Wire up video
   const vid=document.getElementById(`vid-${jobId}`);
+  const verrBox=document.getElementById(`verr-${jobId}`);
+  const verrMsg=document.getElementById(`verrmsg-${jobId}`);
+
+  // Set src programmatically so we can attach error handler first
   vid.src=`/stream/${jobId}/video`;
+  vid.load(); // force browser to start loading (required for dynamic src)
+
   vid.addEventListener('timeupdate',()=>{
     document.getElementById(`vfn-${jobId}`).textContent=`FRAME ${Math.floor(vid.currentTime*30)||'—'}`;
+  });
+
+  // Show actionable error overlay when codec/network fails
+  vid.addEventListener('error',()=>{
+    const codes={1:'ABORTED',2:'NETWORK ERROR',3:'DECODE ERROR (codec not supported)',4:'FORMAT NOT SUPPORTED'};
+    const code=vid.error?vid.error.code:0;
+    const msg=codes[code]||'Unknown error';
+    verrMsg.textContent=`Video error: ${msg}. The annotated video was saved — click below to download it.`;
+    verrBox.style.display='flex';
+    vid.style.display='none';
+  });
+
+  vid.addEventListener('loadedmetadata',()=>{
+    verrBox.style.display='none';
+    vid.style.display='block';
   });
 
   // Wire up timeline frames
@@ -1055,9 +1085,4 @@ function buildDownloadsHtml(jobId){
       <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="${f.color}" stroke-width="1.5"><path d="${f.icon}"/></svg>
       <div class="dl-name" style="color:${f.color}">${f.label}</div>
       <div class="dl-ext">${f.ext}</div>
-      <div class="dl-prog" style="background:${f.color}"></div>
-    </a>`).join('');
-}
-</script>
-</body>
-</html>
+      <div class="d

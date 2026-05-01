@@ -49,11 +49,15 @@ def _run_pipeline(job_id: str, video_path: str):
             msg = self.format(record)
             log_q.put(msg)
 
-    # Attach queue handler to root logger for this thread
+    # Attach queue handler to root logger AND PipelineRunner logger.
+    # PipelineRunner sets propagate=False so its [START]/[DONE] messages
+    # would otherwise never reach the root logger and thus never reach the UI.
     handler = QueueHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     logging.getLogger().addHandler(handler)
     logging.getLogger().setLevel(logging.INFO)
+    logging.getLogger("PipelineRunner").addHandler(handler)
+    logging.getLogger("PipelineRunner").setLevel(logging.INFO)
 
     try:
         from pipeline_runner import PipelineRunner
@@ -63,6 +67,7 @@ def _run_pipeline(job_id: str, video_path: str):
         import modules.detector as detector
         import modules.tracker as tracker
         import modules.behavior_analyzer as behavior_analyzer
+        import modules.intent_predictor as intent_predictor
         import modules.tagger as tagger
         import exporter as exporter_mod
         import visualizer
@@ -74,6 +79,7 @@ def _run_pipeline(job_id: str, video_path: str):
             ("detection",         detector.run),
             ("tracking",          tracker.run),
             ("behavior_analysis", behavior_analyzer.run),
+            ("intent_prediction", intent_predictor.run),
             ("tagging",           tagger.run),
             ("export",            exporter_mod.run),
         ]
@@ -279,11 +285,7 @@ async def download(job_id: str, file_type: str):
         raise HTTPException(400, f"Unknown file type: {file_type}")
 
     filename, media_type = type_map[file_type]
-    file_path = job["result"].get(file_type.replace("video", "video"))
-
-    # Map key names
-    key_map = {"video": "video", "json": "json", "csv": "csv", "xml": "xml"}
-    file_path = job["result"][key_map[file_type]]
+    file_path = job["result"].get(file_type)
 
     if not file_path or not os.path.exists(file_path):
         raise HTTPException(404, f"Output file not found: {file_path}")
@@ -292,8 +294,3 @@ async def download(job_id: str, file_type: str):
         path=file_path,
         filename=filename,
         media_type=media_type,
-    )
-
-
-if __name__ == "__main__":
-    uvicorn.run("app.server:app", host="127.0.0.1", port=8000, reload=False)

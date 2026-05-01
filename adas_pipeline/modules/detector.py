@@ -121,11 +121,16 @@ def run_detection(records: List[Dict]) -> List[Dict]:
         frame_id = record["frame_id"]
         file_path = record.get("file_path")
 
-        if file_path and os.path.exists(file_path):
+        if record.get("jaad_annotations"):
+            # JAAD mode: always use ground-truth bboxes + crossing labels.
+            # Even when a frame image exists on disk, YOLO would discard the
+            # crossing intent labels that live in the XML annotations.
+            detections = detect_from_jaad_annotations(record)
+        elif file_path and os.path.exists(file_path):
+            # Video mode: run YOLO on the extracted frame image
             detections = detect_frame(file_path, frame_id)
         else:
-            # Annotation-only mode — use JAAD ground truth
-            detections = detect_from_jaad_annotations(record)
+            detections = []
 
         # Save per-frame annotation JSON
         ann_filename = f"frame_{frame_id:06d}_detections.json"

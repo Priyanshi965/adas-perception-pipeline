@@ -84,17 +84,49 @@ def _draw_danger_bar(img, x: int, y: int, score: float, bar_w: int = 40, bar_h: 
         cv2.rectangle(img, (x, y - bar_h - 2), (x + filled, y - 2), color, -1)
 
 
+INTENT_COLORS = {
+    "crossing":     (0,   80, 255),   # orange-red  — high attention
+    "not_crossing": (50, 220,  50),   # green        — safe
+}
+
+
+def _draw_intent_badge(img, x: int, y: int, w: int, intent: str, prob: float, conf: float):
+    """Draw a compact intent badge below the bounding box bottom edge."""
+    label   = "CROSS" if intent == "crossing" else "SAFE"
+    pct     = int(prob * 100)
+    text    = f"{label} {pct}%"
+    color   = INTENT_COLORS.get(intent, (200, 200, 200))
+
+    (tw, th), _ = cv2.getTextSize(text, FONT, 0.42, 1)
+    bx = max(x, 2)
+    by = y + w + 14   # below the bottom of the bbox
+    # Background pill
+    cv2.rectangle(img, (bx - 3, by - th - 3), (bx + tw + 3, by + 3), (15, 15, 15), -1)
+    cv2.rectangle(img, (bx - 3, by - th - 3), (bx + tw + 3, by + 3), color, 1)
+    cv2.putText(img, text, (bx, by), FONT, 0.42, color, 1, cv2.LINE_AA)
+
+    # Thin confidence bar inside badge
+    bar_total = tw + 6
+    bar_filled = int(bar_total * conf)
+    if bar_filled > 0:
+        cv2.line(img, (bx - 3, by + 3), (bx - 3 + bar_filled, by + 3), color, 2)
+
+
 def _draw_detection(img, det: dict):
     bbox  = det.get("bbox") or [0, 0, 10, 10]
     x, y, w, h = [int(v) for v in bbox]
     score = float(det.get("danger_score") or 0.0)
     behavior = det.get("behavior", "?")
     tid   = det.get("track_id") or det.get("id") or "?"
+    intent  = det.get("intent")
+    prob    = float(det.get("crossing_prob") or 0.0)
+    conf    = float(det.get("intent_conf")   or 0.0)
 
     color = _score_to_bgr(score)
 
-    # Bounding box
-    cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+    # Bounding box — thicker for pedestrians with crossing intent
+    thickness = 3 if intent == "crossing" else 2
+    cv2.rectangle(img, (x, y), (x + w, y + h), color, thickness)
 
     # Danger bar above box
     _draw_danger_bar(img, x, y, score, bar_w=w)
@@ -107,6 +139,10 @@ def _draw_detection(img, det: dict):
 
     cv2.rectangle(img, (tx - 2, ty - th - 3), (tx + tw + 2, ty + 2), (20, 20, 20), -1)
     cv2.putText(img, text, (tx, ty), FONT, FONT_SCALE, color, THICKNESS, cv2.LINE_AA)
+
+    # Intent badge (pedestrians only)
+    if intent is not None:
+        _draw_intent_badge(img, x, y, h, intent, prob, conf)
 
 
 def bar_h_offset(y: int, text_h: int) -> int:
@@ -193,9 +229,13 @@ def render_video(
             logger.info(f"  Rendered {i}/{len(records)} frames...")
 
     # ── Encoder waterfall ──────────────────────────────────────────────
-    # 1) PyAV  →  true H.264 MP4, works everywhere, no subprocess
-    # 2) imageio[ffmpeg]  →  H.264 via bundled ffmpeg binary
-    # 3) OpenCV mp4v  →  MPEG-4 MP4 (playable after download, not in browser)
+    # Priority (browser-playable H.264 first):
+    # 1) PyAV         → true H.264 MP4, pure Python, best choice
+    # 2) ffmpeg CLI   → re-encode via subprocess if ffmpeg is on PATH
+    # 3) imageio      → H.264 via bundled ffmpeg binary
+    # 4) OpenCV avc1  → H.264 on Windows if codec is installed
+    # 5) OpenCV mp4v  → MPEG-4 fallback (download-only, not inline)
+
     def _encode_pyav(frames, output_path, fps, w, h):
         import av  # noqa: PLC0415
         container = av.open(output_path, mode="w")
@@ -211,40 +251,99 @@ def render_video(
             container.mux(pkt)
         container.close()
 
+    def _encode_ffmpeg_cli(frames, output_path, fps, w, h):
+        """Write frames as raw pipe to ffmpeg CLI → H.264 MP4."""
+        import subprocess, shutil  # noqa: PLC0415
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("ffmpeg not on PATH")
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-s", f"{w}x{h}", "-pix_fmt", "bgr24",
+            "-r", str(fps),
+            "-i", "pipe:0",
+            "-vcodec", "libx264", "-crf", "23",
+            "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for img in frames:
+            proc.stdin.write(img.tobytes())
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg CLI exited non-zero")
+
     def _encode_imageio(frames, output_path, fps, w, h):
         import imageio  # noqa: PLC0415
-        writer = imageio.get_writer(output_path, fps=fps, codec="libx264",
-                                    quality=None,
-                                    output_params=["-crf", "23", "-preset", "fast",
-                                                   "-pix_fmt", "yuv420p"])
+        writer = imageio.get_writer(
+            output_path, fps=fps, codec="libx264", quality=None,
+            output_params=["-crf", "23", "-preset", "fast",
+                           "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        )
         for img in frames:
             writer.append_data(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         writer.close()
 
-    def _encode_opencv(frames, output_path, fps, w, h):
+    def _encode_opencv_avc1(frames, output_path, fps, w, h):
+        """OpenCV with H.264 fourcc — works on Windows with codec installed."""
+        wr = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"avc1"), fps, (w, h))
+        if not wr.isOpened():
+            raise RuntimeError("OpenCV avc1 writer failed to open")
+        for img in frames:
+            wr.write(img)
+        wr.release()
+        # Verify the file was actually written (avc1 silently falls back to nothing on some platforms)
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
+            raise RuntimeError("OpenCV avc1 produced empty/missing file")
+
+    def _encode_opencv_mp4v(frames, output_path, fps, w, h):
+        """MPEG-4 Part 2 — not browser-streamable but works as a download."""
         wr = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
         if not wr.isOpened():
-            raise RuntimeError("OpenCV VideoWriter failed")
+            raise RuntimeError("OpenCV mp4v writer failed to open")
         for img in frames:
             wr.write(img)
         wr.release()
 
     encoders = [
-        ("PyAV H.264",      _encode_pyav),
-        ("imageio H.264",   _encode_imageio),
-        ("OpenCV mp4v",     _encode_opencv),
+        ("PyAV H.264",        _encode_pyav),
+        ("ffmpeg CLI H.264",  _encode_ffmpeg_cli),
+        ("imageio H.264",     _encode_imageio),
+        ("OpenCV avc1 H.264", _encode_opencv_avc1),
+        ("OpenCV mp4v",       _encode_opencv_mp4v),
     ]
 
+    used_encoder = None
     for name, fn in encoders:
         try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
             fn(frames, output_path, fps, frame_width, frame_height)
             if os.path.exists(output_path) and os.path.getsize(output_path) > 500:
                 logger.info(f"Video saved ({name}): {output_path}")
-                return output_path
+                used_encoder = name
+                break
         except Exception as e:
             logger.warning(f"Encoder '{name}' failed: {e} — trying next...")
 
-    raise RuntimeError("All video encoders failed. Check that av, imageio[ffmpeg], or OpenCV is installed.")
+    if not used_encoder:
+        raise RuntimeError(
+            "All video encoders failed. Install 'av' (pip install av) for H.264 "
+            "browser support, or ensure ffmpeg is on PATH."
+        )
+
+    # If we fell back to mp4v (not browser-playable), warn loudly so the user
+    # knows the inline player may show a grey screen.
+    if "mp4v" in used_encoder:
+        logger.warning(
+            "VIDEO CODEC WARNING: mp4v (MPEG-4 Part 2) was used as a last resort. "
+            "This file is NOT playable inline in browsers (Chrome/Firefox/Safari require H.264). "
+            "Install PyAV: pip install av"
+        )
+
+    return output_path
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

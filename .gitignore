@@ -18,3 +18,15 @@ Pedistrian_intent_detection/models/
 # Pipeline internals
 adas_pipeline/checkpoints/
 adas_pipeline/output/
+
+# Local tool config — never commit
+.claude/
+*.lnk
+
+# Test/temp inputs
+adas_pipeline/input/
+
+# Docs not part of code
+*.docx
+*.pdf
+pipeline_diagram.png

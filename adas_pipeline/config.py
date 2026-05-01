@@ -125,3 +125,28 @@ JAAD_FPS          = 29.97
 
 OUTPUT_JSON_NAME = "dataset.json"
 OUTPUT_CSV_NAME = "dataset.csv"
+
+# ─── Frame Cleaning (enhanced) ────────────────────────────────────────────────
+
+# CLAHE contrast normalisation parameters
+CLAHE_CLIP_LIMIT = 2.0          # max amplification per tile (2.0 = moderate boost)
+CLAHE_TILE_SIZE  = (8, 8)       # adaptive tile grid for localised normalisation
+
+# Perceptual-hash deduplication — dHash Hamming distance below this → duplicate
+# Range 0–256 (16×16 bit hash).  6 ≈ <3% pixel change between consecutive frames.
+DUPLICATE_HASH_THRESHOLD = 6
+
+# ─── Intent Prediction ────────────────────────────────────────────────────────
+
+# Path for trained LSTM weights (.npz format for NumPy inference)
+INTENT_MODEL_PATH = os.path.join(BASE_DIR, "checkpoints", "intent_model.npz")
+
+# Input sequence length (number of past frames fed to the LSTM)
+INTENT_SEQ_LEN = 24
+
+# LSTM hidden dimension
+INTENT_HIDDEN_SIZE = 64
+
+# Probability threshold for "crossing" classification
+# Raised from 0.5 → 0.65 to reduce false positives while keeping recall high
+INTENT_THRESHOLD = 0.65
