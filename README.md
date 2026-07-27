@@ -69,6 +69,100 @@ Input Video / JAAD Dataset
 
 ---
 
+## 🔄 How It Works — Detailed Workflow
+
+The system has **two flows** that share the same feature code: an **inference
+flow** (live video → per-frame crossing predictions) and a **training flow**
+(JAAD dataset → a trained model). Both are driven by a `PipelineRunner` that
+executes stages in order, passing a shared `context` dict; each stage reads keys
+it needs and merges its outputs back in, and every stage is checkpointed so a
+crashed run can `--resume`.
+
+### A. Inference flow (dashcam / surveillance video → predictions)
+
+```
+video ─▶ context{video_path}
+  │
+  ├─ input_handler   reads codec/size/fps; sets context{width,height,fps}
+  ├─ frame_extractor samples every Nth frame → output/frames/frame_000042.jpg
+  ├─ frame_cleaner   drops blurry (Laplacian), dark (mean-brightness), and
+  │                  near-duplicate (dHash) frames; CLAHE-normalises the rest
+  │                  → context{frame_records:[{frame_id,file_path,timestamp}]}
+  ├─ detector        RT-DETR on each clean frame → detections[{label,bbox,conf}]
+  │                  (label = pedestrian | vehicle, bbox = [x,y,w,h])
+  ├─ tracker         ByteTrack links detections across frames, assigning a stable
+  │                  track_id; builds context{track_history:{tid:[(frame_id,bbox,ts)]}}
+  ├─ pose_estimator  runs YOLO-pose on each frame, matches each 17-keypoint
+  │                  skeleton to a pedestrian box by IoU, and attaches
+  │                  det{keypoints, kpt_conf, pose_features} (10 body-language values)
+  ├─ behavior_analyzer  motion label (walking/crossing/…) from displacement
+  ├─ intent_predictor   THE PREDICTION STEP (see below)
+  ├─ tagger          danger_score + DANGER/SAFE scene tag
+  └─ exporter        dataset.json / dataset.csv  (+ visualizer → MP4, xml_exporter)
+```
+
+**Inside `intent_predictor` (causal, per frame).** For each pedestrian track it
+rebuilds a per-frame **feature timeline** of shape `(T, 18)`:
+- 8 **kinematic** channels — normalised bbox centre/size and their 1st/2nd time
+  derivatives (velocity, acceleration), computed causally from `track_history`;
+- 10 **body-language** channels — the `pose_features` attached upstream.
+
+It then slides an `OBS_LEN`-frame window ending at each frame `t`, feeds it to the
+LSTM, and writes `det{intent, crossing_prob, intent_conf}` for that frame. Every
+prediction uses **only frames ≤ t** — the model never sees the future, so the
+annotated video is causal (unlike the old version, which stamped one label,
+computed from the whole track, onto every frame).
+
+### B. Training flow (JAAD dataset → trained model)
+
+```
+JAAD annotations/*.xml + JAAD_clips/*.mp4
+  │
+  ├─ jaad_loader.parse_video   XML → PedTrack objects: per pedestrian, a
+  │      time-ordered list of {frame, bbox, cross, look, action, occlusion}
+  │      (only 'pedestrian'-labelled tracks carry the behavioural labels)
+  │
+  ├─ build_jaad_features        for each track:
+  │      1. downsample to a fixed ~10 fps timeline (JAAD_TIMELINE_STRIDE)
+  │      2. read those exact frames from the clip
+  │      3. run pose on the GROUND-TRUTH box crop → body-language features
+  │      4. compute causal kinematics from the box trajectory
+  │      5. mirror lateral features to ego-lateral coords (via net motion sign)
+  │      → cache one pickle per video (pose is computed once, reused on re-runs)
+  │
+  ├─ intent_features.make_windows   observe→predict ONSET windowing (leak-free):
+  │      sample only where the pedestrian is NOT yet crossing; label = does a
+  │      crossing BEGIN within the next TTE steps? Split at TRACK level.
+  │
+  ├─ train_intent.py            2-layer LSTM, focal loss, class-balanced sampler,
+  │      early-stop on val ROC-AUC, threshold calibrated on validation; exports
+  │      NumPy .npz (weights + norm stats + active columns + threshold) so
+  │      inference needs no PyTorch.
+  │
+  └─ compare_models.py          5-fold CV, pools out-of-fold predictions, and
+         reports the before/after table + all figures.
+```
+
+### Key data structures
+
+| Object | Shape / form | Where |
+|---|---|---|
+| `frame_records` | list of `{frame_id, file_path, detections[…]}` | flows through every stage |
+| `track_history` | `{track_id: [(frame_id, [x,y,w,h], ts), …]}` | built by tracker |
+| `pose_features` | dict of 10 named body-language values per detection | pose stage |
+| feature timeline | `(T, 18)` array per track (8 kinematic + 10 pose) | `intent_features` |
+| model `.npz` | LSTM weights + `feat_mean/std`, `active_cols`, `obs_len`, `threshold` | trained model |
+
+### The single source of truth
+
+`modules/intent_features.py` defines the canonical 20-channel layout
+(8 kinematic + 10 pose + 2 optional aux) and the observe→predict windowing used
+by **all three** of the dataset builder, the trainer, and the live predictor — so
+training and inference can never silently disagree on channel order or leak the
+future.
+
+---
+
 ## 📦 Output Formats
 
 ### `dataset.json`
