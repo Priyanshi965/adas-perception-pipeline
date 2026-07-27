@@ -84,9 +84,17 @@ def train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, epochs, hidden, seed):
     mean = Xtr.reshape(-1, len(cols)).mean(0); std = Xtr.reshape(-1, len(cols)).std(0) + 1e-6
     Xtr, Xva, Xte = (Xtr - mean) / std, (Xva - mean) / std, (Xte - mean) / std
 
+    import torch.nn.functional as F
     npos = max(int(ytr.sum()), 1); nneg = max(len(ytr) - npos, 1)
     net = build_net(len(cols), hidden)
-    crit = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([min(nneg / npos, 8.0)], dtype=torch.float32))
+    pw = torch.tensor([min(nneg / npos, 8.0)], dtype=torch.float32)
+
+    def crit(logits, targets, gamma=2.0):
+        # focal BCE: down-weights easy examples, focuses on the rare hard onsets
+        ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none", pos_weight=pw)
+        p = torch.sigmoid(logits)
+        p_t = p * targets + (1 - p) * (1 - targets)
+        return ((1 - p_t) ** gamma * ce).mean()
     opt = torch.optim.Adam(net.parameters(), lr=3e-4, weight_decay=1e-4)
     w = np.where(ytr == 1, len(ytr) / (2 * npos), len(ytr) / (2 * nneg))
     sampler = torch.utils.data.WeightedRandomSampler(torch.tensor(w, dtype=torch.float32), len(ytr), True)
@@ -233,23 +241,69 @@ def make_plots(results, yte, ttes):
     logger.info(f"Figures saved → {OUT}")
 
 
+def kfold(n, k, seed):
+    """Yield (train_val_idx, test_idx) track-index splits for k-fold CV."""
+    idx = np.arange(n); np.random.RandomState(seed).shuffle(idx)
+    folds = np.array_split(idx, k)
+    for i in range(k):
+        te = folds[i]
+        tv = np.concatenate([folds[j] for j in range(k) if j != i])
+        yield tv, te
+
+
+def cross_validate(tracks, cols, k, epochs, hidden, seed):
+    """
+    k-fold CV over tracks. Every track is tested exactly once; test predictions
+    are pooled across folds for a single stable evaluation, and per-fold AUC is
+    kept for a mean±std. Returns dict with pooled probs/labels/ttes + fold AUCs.
+    """
+    from sklearn.metrics import roc_auc_score
+    probs_all, y_all, tte_all, fold_aucs, val_hist0 = [], [], [], [], []
+    for fi, (tv, te) in enumerate(kfold(len(tracks), k, seed)):
+        rng = np.random.RandomState(seed + fi); rng.shuffle(tv)
+        n_val = max(int(len(tv) * 0.18), 1)
+        va_ids, tr_ids = tv[:n_val], tv[n_val:]
+        Wtr, ytr, _, _ = windows_all(tracks, tr_ids)
+        Wva, yva, _, _ = windows_all(tracks, va_ids)
+        Wte, yte, ttes, _ = windows_all(tracks, te)
+        if len(ytr) == 0 or len(yte) == 0:
+            continue
+        r = train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, epochs, hidden, seed)
+        probs_all.append(r["probs"]); y_all.append(yte); tte_all.append(ttes)
+        if len(np.unique(yte)) > 1:
+            fold_aucs.append(roc_auc_score(yte, r["probs"]))
+        if fi == 0:
+            val_hist0 = r["val_hist"]
+    probs = np.concatenate(probs_all); y = np.concatenate(y_all); ttes = np.concatenate(tte_all)
+    # calibrate one operating threshold on the pooled out-of-fold predictions
+    from sklearn.metrics import balanced_accuracy_score
+    cand = np.unique(np.clip(probs, 0.05, 0.95))
+    thr = max((balanced_accuracy_score(y, (probs >= t).astype(int)), t) for t in cand)[1] if len(np.unique(y)) > 1 else 0.5
+    return dict(probs=probs, thr=float(thr), val_hist=val_hist0,
+               fold_auc=(float(np.mean(fold_aucs)), float(np.std(fold_aucs))), y=y, ttes=ttes)
+
+
 def write_table(results, meta):
     path = os.path.join(config.OUTPUT_DIR, "comparison_report.md")
     keys = ["AUC", "AP", "Accuracy", "BalancedAcc", "Precision", "Recall", "F1"]
     lines = ["# Crossing-Intent Model — Before/After Comparison", "",
              f"- Dataset: {meta['videos']} JAAD videos, {meta['tracks']} pedestrian tracks "
-             f"({meta['train']}/{meta['val']}/{meta['test']} train/val/test, track-level split)",
+             f"({meta['folds']}-fold cross-validation, split at track level)",
              f"- Task: crossing-**onset** prediction, observe {config.INTENT_OBS_LEN} steps → "
              f"predict within {config.INTENT_TTE} steps (leak-free)",
-             f"- Test windows: {meta['n_test']} ({meta['test_pos']} positive)", "",
-             "| Feature set | " + " | ".join(keys) + " |",
-             "|---|" + "|".join(["---"] * len(keys)) + "|"]
+             f"- Evaluation: {meta['n_test']} out-of-fold test windows ({meta['test_pos']} positive), "
+             f"pooled across folds so every track is tested once", "",
+             "| Feature set | " + " | ".join(keys) + " | AUC (mean±std) |",
+             "|---|" + "|".join(["---"] * (len(keys) + 1)) + "|"]
     labelmap = {"trajectory": "Trajectory only (before)", "pose": "Body-language only",
                 "pose+traj": "Pose + trajectory (after)"}
     for name, r in results.items():
         row = [f"{r['m'][k]:.3f}" for k in keys]
-        lines.append(f"| {labelmap.get(name, name)} | " + " | ".join(row) + " |")
-    lines += ["", f"Generated from `compare_models.py`. Figures in `output/plots/comparison/`."]
+        fa = r.get("fold_auc", (float("nan"), 0.0))
+        lines.append(f"| {labelmap.get(name, name)} | " + " | ".join(row) +
+                     f" | {fa[0]:.3f} ± {fa[1]:.3f} |")
+    lines += ["", f"Generated from `compare_models.py` ({meta['folds']}-fold CV). "
+                  f"Figures in `output/plots/comparison/`."]
     open(path, "w", encoding="utf-8").write("\n".join(lines))
     logger.info(f"Table → {path}")
     return path, lines
@@ -257,35 +311,32 @@ def write_table(results, meta):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--videos", type=int, default=90)
-    ap.add_argument("--epochs", type=int, default=120)
-    ap.add_argument("--hidden", type=int, default=config.INTENT_HIDDEN_SIZE)
+    ap.add_argument("--videos", type=int, default=130)
+    ap.add_argument("--epochs", type=int, default=150)
+    ap.add_argument("--hidden", type=int, default=96)
+    ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
     tracks = bjf.build_dataset(vids, with_pose=True, force=False)
     tracks = [t for t in tracks if (t["cross"] == 0).any()]  # need prediction points
-    tr_ids, va_ids, te_ids = split_tracks(tracks, args.seed)
-    Wtr, ytr, _, _ = windows_all(tracks, tr_ids)
-    Wva, yva, _, _ = windows_all(tracks, va_ids)
-    Wte, yte, ttes, _ = windows_all(tracks, te_ids)
-    logger.info(f"Tracks {len(tracks)} | windows tr/va/te = {len(ytr)}/{len(yva)}/{len(yte)} | "
-                f"test +ve={int(yte.sum())}")
+    logger.info(f"Tracks {len(tracks)} | {args.folds}-fold CV")
 
-    results = {}
+    results, yref, tteref = {}, None, None
     for name, cfg in CONFIGS.items():
         cols = ifeat.active_columns(cfg["use_kin"], cfg["use_pose"])
-        logger.info(f"Training [{name}] ({len(cols)} features)…")
-        r = train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, args.epochs, args.hidden, args.seed)
-        r["m"] = metrics(r["probs"], yte, r["thr"])
+        logger.info(f"CV [{name}] ({len(cols)} features)…")
+        r = cross_validate(tracks, cols, args.folds, args.epochs, args.hidden, args.seed)
+        r["m"] = metrics(r["probs"], r["y"], r["thr"])
         results[name] = r
-        logger.info(f"  {name}: AUC={r['m']['AUC']:.3f} AP={r['m']['AP']:.3f} "
+        yref, tteref = r["y"], r["ttes"]   # identical pooled order across configs
+        logger.info(f"  {name}: AUC={r['m']['AUC']:.3f} (fold {r['fold_auc'][0]:.3f}±{r['fold_auc'][1]:.3f}) "
                     f"BalAcc={r['m']['BalancedAcc']:.3f} F1={r['m']['F1']:.3f}")
 
-    make_plots(results, yte, ttes)
-    meta = dict(videos=args.videos, tracks=len(tracks), train=len(tr_ids), val=len(va_ids),
-                test=len(te_ids), n_test=len(yte), test_pos=int(yte.sum()))
+    make_plots(results, yref, tteref)
+    meta = dict(videos=args.videos, tracks=len(tracks), folds=args.folds,
+                n_test=len(yref), test_pos=int(yref.sum()))
     _, lines = write_table(results, meta)
     print("\n".join(lines))
 
