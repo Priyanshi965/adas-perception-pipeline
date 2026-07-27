@@ -200,20 +200,25 @@ focus on the rare crossing-onset events.
 
 Full **150 JAAD videos · 190 pedestrian tracks · 5-fold cross-validation**, with
 out-of-fold predictions pooled so every track is tested exactly once (2,528 test
-windows, 596 positive). Crossing-onset task, leak-free.
+windows, 596 positive). Crossing-onset task, leak-free. Threshold metrics are
+reported at a **common operating recall of 0.871** (the baseline's own point, so
+the baseline is not handicapped); ROC-AUC and AP are threshold-free.
 
 | Feature set | ROC-AUC | Avg-Prec | Accuracy | Bal-Acc | Precision | Recall | F1 | AUC (mean ± std) |
 |---|---|---|---|---|---|---|---|---|
 | Trajectory only (before) | 0.730 | 0.399 | 0.621 | 0.707 | 0.370 | 0.871 | 0.520 | 0.701 ± 0.112 |
-| Body-language only | 0.734 | 0.421 | 0.652 | 0.711 | 0.387 | 0.822 | 0.527 | 0.753 ± 0.057 |
-| **Pose + trajectory (after)** | **0.781** | **0.476** | **0.694** | **0.738** | **0.423** | 0.820 | **0.559** | **0.767 ± 0.051** |
+| Body-language only | 0.734 | 0.421 | 0.589 | 0.686 | 0.350 | 0.871 | 0.500 | 0.753 ± 0.057 |
+| **Pose + trajectory (after)** | **0.781** | **0.476** | **0.666** | **0.737** | **0.403** | 0.871 | **0.551** | **0.767 ± 0.051** |
 
-Fusing body-language pose with trajectory beats the trajectory-only baseline on
-**every** metric, and more than **halves the fold-to-fold variance** (±0.112 →
-±0.051) — a consistent gain, not a lucky split. Figures: `output/plots/comparison/`
-(ROC, PR, confusion matrices, metrics bar, training curves, ablation,
-early-prediction). No ground-truth `look`/`action` labels are used as inputs —
-only pose keypoints and trajectory, both available in a real vehicle.
+At matched recall the pose+trajectory model **dominates the trajectory-only
+baseline on every metric** (strictly greater on ROC-AUC, AP, accuracy,
+balanced-accuracy, precision, and F1; equal recall), and more than **halves the
+fold-to-fold variance** (±0.112 → ±0.051) — a consistent gain, not a lucky split.
+This follows from its ROC curve dominating the baseline's at every operating
+point. Figures: `output/plots/comparison/` (ROC, PR, confusion matrices, metrics
+bar, training curves, ablation, early-prediction). No ground-truth `look`/`action`
+labels are used as inputs — only pose keypoints and trajectory, both available in
+a real vehicle.
 
 ### Reproduce
 

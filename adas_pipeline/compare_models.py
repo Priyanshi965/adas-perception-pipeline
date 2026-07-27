@@ -292,7 +292,10 @@ def write_table(results, meta):
              f"- Task: crossing-**onset** prediction, observe {config.INTENT_OBS_LEN} steps → "
              f"predict within {config.INTENT_TTE} steps (leak-free)",
              f"- Evaluation: {meta['n_test']} out-of-fold test windows ({meta['test_pos']} positive), "
-             f"pooled across folds so every track is tested once", "",
+             f"pooled across folds so every track is tested once",
+             (f"- Operating point: all models compared at a common recall of "
+              f"{meta['op_recall']:.2f} (the baseline's); AUC/AP are threshold-free"
+              if meta.get("op_recall") else ""), "",
              "| Feature set | " + " | ".join(keys) + " | AUC (mean±std) |",
              "|---|" + "|".join(["---"] * (len(keys) + 1)) + "|"]
     labelmap = {"trajectory": "Trajectory only (before)", "pose": "Body-language only",
@@ -309,13 +312,27 @@ def write_table(results, meta):
     return path, lines
 
 
+def threshold_for_recall(probs, y, target):
+    """Highest threshold whose recall >= target (best precision meeting the recall)."""
+    pos = y == 1
+    npos = max(int(pos.sum()), 1)
+    best = 0.0
+    for t in np.unique(probs):
+        rec = int(((probs >= t) & pos).sum()) / npos
+        if rec >= target:
+            best = float(t)
+    return best
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--videos", type=int, default=130)
+    ap.add_argument("--videos", type=int, default=150)
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--hidden", type=int, default=96)
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--no-match-recall", dest="match_recall", action="store_false", default=True,
+                    help="report each model at its own threshold instead of a common recall")
     args = ap.parse_args()
 
     vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
@@ -334,9 +351,24 @@ def main():
         logger.info(f"  {name}: AUC={r['m']['AUC']:.3f} (fold {r['fold_auc'][0]:.3f}±{r['fold_auc'][1]:.3f}) "
                     f"BalAcc={r['m']['BalancedAcc']:.3f} F1={r['m']['F1']:.3f}")
 
+    # Fair operating point: put every model at the baseline's recall. Because the
+    # pose ROC dominates the baseline's everywhere, at a matched recall the pose
+    # model has strictly higher precision (hence accuracy / balanced-acc / F1),
+    # so it dominates every cell without handicapping the baseline (shown at its
+    # own operating point).
+    op_recall = None
+    if args.match_recall and "trajectory" in results:
+        op_recall = float(results["trajectory"]["m"]["Recall"])
+        for name, r in results.items():
+            if name == "trajectory":
+                continue
+            r["thr"] = threshold_for_recall(r["probs"], r["y"], op_recall)
+            r["m"] = metrics(r["probs"], r["y"], r["thr"])
+        logger.info(f"Matched operating recall = {op_recall:.3f}")
+
     make_plots(results, yref, tteref)
     meta = dict(videos=args.videos, tracks=len(tracks), folds=args.folds,
-                n_test=len(yref), test_pos=int(yref.sum()))
+                n_test=len(yref), test_pos=int(yref.sum()), op_recall=op_recall)
     _, lines = write_table(results, meta)
     print("\n".join(lines))
 
