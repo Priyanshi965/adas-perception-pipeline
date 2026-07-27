@@ -199,4 +199,6 @@ class PipelineRunner:
                 if os.path.exists(path):
                     try:
                         os.remove(path)
-                        self.logger.info(f"Cleared checkp
+                        self.logger.info(f"Cleared checkpoint: {os.path.basename(path)}")
+                    except OSError as e:
+                        self.logger.warning(f"Could not delete checkpoint {os.path.basename(path)}: {e}")

@@ -4,6 +4,15 @@ No hardcoded values in any other module.
 """
 
 import os
+import sys
+
+# Windows consoles default to cp1252 and crash when logs contain non-ASCII.
+# config is imported before logging is used everywhere, so fix stdout here once.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -47,12 +56,27 @@ BRIGHTNESS_THRESHOLD = 40.0
 # Saturation ratio — if >95% of pixels are pure black or pure white, skip frame
 CORRUPTION_SATURATION_RATIO = 0.95
 
-# ─── Detection (YOLOv8) ───────────────────────────────────────────────────────
+# ─── Detection ────────────────────────────────────────────────────────────────
 
-# Path to YOLO weights — uses the one already in the repo
-YOLO_MODEL_PATH = os.path.join(BASE_DIR, "..", "Pedistrian_intent_detection", "yolov8n.pt")
+# Detector backbone for the live-video path. Options:
+#   "rtdetr"  → RT-DETR: transformer detector, NMS-free, stronger under
+#               occlusion/crowding. The "more adaptable algorithm" upgrade.
+#   "yolo11"  → YOLO11 (newer YOLO generation, better than v8).
+#   "yolov8"  → original YOLOv8n (legacy / fastest).
+# NOTE: JAAD mode uses ground-truth boxes and never runs the detector, so this
+#       only affects video/deployment inference, not JAAD intent accuracy.
+DETECTOR_BACKEND = "rtdetr"
 
-# Fallback: download yolov8n if not found locally
+# Weights per backbone. Missing files auto-download from the ultralytics hub.
+DETECTOR_WEIGHTS = {
+    "rtdetr": os.path.join(BASE_DIR, "..", "Pedistrian_intent_detection", "rtdetr-l.pt"),
+    "yolo11": os.path.join(BASE_DIR, "..", "Pedistrian_intent_detection", "yolo11n.pt"),
+    "yolov8": os.path.join(BASE_DIR, "..", "Pedistrian_intent_detection", "yolov8n.pt"),
+}
+DETECTOR_FALLBACK = {"rtdetr": "rtdetr-l.pt", "yolo11": "yolo11n.pt", "yolov8": "yolov8n.pt"}
+
+# Legacy aliases (kept so older code / configs keep working)
+YOLO_MODEL_PATH = DETECTOR_WEIGHTS["yolov8"]
 YOLO_MODEL_FALLBACK = "yolov8n.pt"
 
 # Minimum detection confidence (0.0–1.0)
@@ -136,17 +160,52 @@ CLAHE_TILE_SIZE  = (8, 8)       # adaptive tile grid for localised normalisation
 # Range 0–256 (16×16 bit hash).  6 ≈ <3% pixel change between consecutive frames.
 DUPLICATE_HASH_THRESHOLD = 6
 
+# ─── Pose Estimation (body language) ──────────────────────────────────────────
+
+# Enable the pose stage (17-keypoint COCO skeletons for body-language features)
+POSE_ENABLED = True
+
+# Pose model weights (YOLO-pose). Auto-downloads if missing.
+POSE_MODEL_PATH = os.path.join(BASE_DIR, "..", "Pedistrian_intent_detection", "yolo11n-pose.pt")
+POSE_MODEL_FALLBACK = "yolo11n-pose.pt"
+
+# Person-detection confidence for the pose model
+POSE_CONF_THRESHOLD = 0.35
+
+# Per-keypoint confidence below which a joint is treated as missing
+POSE_KPT_CONF_THR = 0.30
+
+# Padding (fraction of box size) added around a GT box before cropping for pose
+POSE_CROP_PAD = 0.15
+
+# IoU to match a detected skeleton to a tracked pedestrian box (frame-level pose)
+POSE_MATCH_IOU = 0.30
+
 # ─── Intent Prediction ────────────────────────────────────────────────────────
 
-# Path for trained LSTM weights (.npz format for NumPy inference)
+# Path for trained model weights (.npz format for NumPy inference)
 INTENT_MODEL_PATH = os.path.join(BASE_DIR, "checkpoints", "intent_model.npz")
 
-# Input sequence length (number of past frames fed to the LSTM)
-INTENT_SEQ_LEN = 24
+# Tracks are downsampled to a fixed timeline before featurising. JAAD is ~30fps;
+# stride 3 → a ~10fps timeline. All window sizes below are in *timeline steps*.
+JAAD_TIMELINE_STRIDE = 3
+
+# Observe→predict formulation (JAAD/PIE standard, prevents future leakage):
+#   at timeline step t, observe [t-OBS_LEN+1 .. t]; label = does a crossing
+#   frame occur within the next TTE steps [t+1 .. t+TTE].
+INTENT_OBS_LEN = 16          # observation window (~1.6s at 10fps)
+INTENT_TTE = 15              # predict a crossing within ~1.5s ahead
+INTENT_SEQ_LEN = INTENT_OBS_LEN   # backward-compat alias
+
+# Slide window start by this many timeline steps to make multiple samples/track
+INTENT_SAMPLE_STRIDE = 2
+
+# Feature composition: which channels feed the model
+INTENT_USE_KINEMATICS = True   # 8 bbox trajectory features
+INTENT_USE_POSE = True         # 10 body-language features from keypoints
 
 # LSTM hidden dimension
 INTENT_HIDDEN_SIZE = 64
 
 # Probability threshold for "crossing" classification
-# Raised from 0.5 → 0.65 to reduce false positives while keeping recall high
-INTENT_THRESHOLD = 0.65
+INTENT_THRESHOLD = 0.5

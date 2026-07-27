@@ -33,7 +33,9 @@ import modules.frame_extractor as frame_extractor
 import modules.frame_cleaner as frame_cleaner
 import modules.detector as detector
 import modules.tracker as tracker
+import modules.pose_estimator as pose_estimator
 import modules.behavior_analyzer as behavior_analyzer
+import modules.intent_predictor as intent_predictor
 import modules.tagger as tagger
 import exporter
 
@@ -45,7 +47,9 @@ def build_stages():
         ("frame_cleaning",    frame_cleaner.run),
         ("detection",         detector.run),
         ("tracking",          tracker.run),
+        ("pose_estimation",   pose_estimator.run),
         ("behavior_analysis", behavior_analyzer.run),
+        ("intent_prediction", intent_predictor.run),
         ("tagging",           tagger.run),
         ("export",            exporter.run),
     ]

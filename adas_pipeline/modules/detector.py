@@ -18,20 +18,35 @@ _model = None
 
 
 def _get_model():
+    """
+    Load the configured detection backbone (config.DETECTOR_BACKEND).
+
+    Default is RT-DETR — a transformer detector (NMS-free, stronger under
+    occlusion/crowding) — the "more adaptable algorithm" upgrade over YOLOv8.
+    "yolo11"/"yolov8" remain selectable. All share ultralytics' predict API and
+    the COCO class ids used elsewhere, so downstream stages are unchanged.
+    """
     global _model
     if _model is None:
-        from ultralytics import YOLO
+        backend = getattr(config, "DETECTOR_BACKEND", "yolov8")
+        weights = getattr(config, "DETECTOR_WEIGHTS", {}).get(backend, config.YOLO_MODEL_PATH)
+        fallback = getattr(config, "DETECTOR_FALLBACK", {}).get(backend, config.YOLO_MODEL_FALLBACK)
 
-        model_path = config.YOLO_MODEL_PATH
+        model_path = weights
         if not os.path.exists(model_path):
             logger.warning(
-                f"YOLO weights not found at {model_path}, "
-                f"falling back to '{config.YOLO_MODEL_FALLBACK}' (will auto-download)"
+                f"Detector weights not found at {model_path}, "
+                f"falling back to '{fallback}' (will auto-download)"
             )
-            model_path = config.YOLO_MODEL_FALLBACK
+            model_path = fallback
 
-        _model = YOLO(model_path)
-        logger.info(f"YOLO model loaded: {model_path}")
+        if backend == "rtdetr":
+            from ultralytics import RTDETR
+            _model = RTDETR(model_path)
+        else:
+            from ultralytics import YOLO
+            _model = YOLO(model_path)
+        logger.info(f"Detector loaded: backend={backend} weights={model_path}")
     return _model
 
 

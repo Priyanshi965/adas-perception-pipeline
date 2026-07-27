@@ -19,9 +19,18 @@ Pedistrian_intent_detection/models/
 adas_pipeline/checkpoints/
 adas_pipeline/output/
 
-# Local tool config — never commit
-.claude/
+# Virtual environment — never commit (contains third-party packages)
+.venv/
+venv/
+env/
+
+# Local tool/editor config — never commit
 *.lnk
+
+# Extracted JAAD frames / pose cache (regenerated from clips)
+Pedistrian_intent_detection/JAAD/images/
+**/pose_cache/
+*.npz
 
 # Test/temp inputs
 adas_pipeline/input/

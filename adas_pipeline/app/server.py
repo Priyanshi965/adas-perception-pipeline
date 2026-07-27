@@ -66,6 +66,7 @@ def _run_pipeline(job_id: str, video_path: str):
         import modules.frame_cleaner as frame_cleaner
         import modules.detector as detector
         import modules.tracker as tracker
+        import modules.pose_estimator as pose_estimator
         import modules.behavior_analyzer as behavior_analyzer
         import modules.intent_predictor as intent_predictor
         import modules.tagger as tagger
@@ -78,6 +79,7 @@ def _run_pipeline(job_id: str, video_path: str):
             ("frame_cleaning",    frame_cleaner.run),
             ("detection",         detector.run),
             ("tracking",          tracker.run),
+            ("pose_estimation",   pose_estimator.run),
             ("behavior_analysis", behavior_analyzer.run),
             ("intent_prediction", intent_predictor.run),
             ("tagging",           tagger.run),
@@ -294,3 +296,8 @@ async def download(job_id: str, file_type: str):
         path=file_path,
         filename=filename,
         media_type=media_type,
+    )
+
+
+if __name__ == "__main__":
+    uvicorn.run("app.server:app", host="127.0.0.1", port=8000, reload=False)
