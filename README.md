@@ -58,7 +58,7 @@ Input Video / JAAD Dataset
 |---|-------|-------------|
 | 1 | **input_handler** | Validates codec, dimensions, frame count; parses JAAD XML for intent labels |
 | 2 | **frame_extractor** | Samples every Nth frame (default: 5), saves JPEGs to `output/frames/` |
-| 3 | **frame_cleaner** | Drops frames failing blur (Laplacian < 100), darkness (mean < 40), or corruption (>95% solid) checks |
+| 3 | **frame_cleaner** | Drops corrupt (>95% solid), blurry, dark (mean < 40), and near-duplicate frames, then denoises + CLAHE-normalises survivors. **Blur threshold is adaptive**: it samples ≤200 frames, takes the 20th-percentile Laplacian variance ×0.5 (capped at `BLUR_THRESHOLD=100`), so degraded footage never loses more than ~20% of frames to blur alone. Dedup uses a 16×16 dHash with Hamming distance < 6 |
 | 4 | **detector** | RT-DETR (transformer, NMS-free) by default; `yolo11`/`yolov8` selectable via `config.DETECTOR_BACKEND` |
 | 5 | **tracker** | ByteTrack (default) or IoU fallback; JAAD mode uses ground-truth `ped_id` directly |
 | 6 | **pose_estimator** | YOLO-pose 17-keypoint skeleton per pedestrian → body-language features (torso lean, head/gaze turn, stance, gait, foot placement) |
@@ -102,10 +102,13 @@ video ─▶ context{video_path}
 ```
 
 **Inside `intent_predictor` (causal, per frame).** For each pedestrian track it
-rebuilds a per-frame **feature timeline** of shape `(T, 18)`:
+rebuilds a per-frame **feature timeline** allocated at `(T, 20)`, of which **18
+channels are active** (the 2 aux columns are off by default):
 - 8 **kinematic** channels — normalised bbox centre/size and their 1st/2nd time
   derivatives (velocity, acceleration), computed causally from `track_history`;
-- 10 **body-language** channels — the `pose_features` attached upstream.
+- 10 **body-language** channels — the `pose_features` attached upstream;
+- 2 **aux** channels (`look`, `action`) — JAAD ground truth, **disabled at
+  deploy time** (not available in a real vehicle), present only for ablations.
 
 It then slides an `OBS_LEN`-frame window ending at each frame `t`, feeds it to the
 LSTM, and writes `det{intent, crossing_prob, intent_conf}` for that frame. Every
@@ -134,7 +137,7 @@ JAAD annotations/*.xml + JAAD_clips/*.mp4
   │      sample only where the pedestrian is NOT yet crossing; label = does a
   │      crossing BEGIN within the next TTE steps? Split at TRACK level.
   │
-  ├─ train_intent.py            2-layer LSTM, focal loss, class-balanced sampler,
+  ├─ train_intent.py            2-layer LSTM, class-weighted BCE + balanced sampler,
   │      early-stop on val ROC-AUC, threshold calibrated on validation; exports
   │      NumPy .npz (weights + norm stats + active columns + threshold) so
   │      inference needs no PyTorch.
@@ -150,7 +153,7 @@ JAAD annotations/*.xml + JAAD_clips/*.mp4
 | `frame_records` | list of `{frame_id, file_path, detections[…]}` | flows through every stage |
 | `track_history` | `{track_id: [(frame_id, [x,y,w,h], ts), …]}` | built by tracker |
 | `pose_features` | dict of 10 named body-language values per detection | pose stage |
-| feature timeline | `(T, 18)` array per track (8 kinematic + 10 pose) | `intent_features` |
+| feature timeline | `(T, 20)` array allocated; **18 active** (8 kinematic + 10 pose; 2 aux `look`/`action` off by default) | `intent_features` |
 | model `.npz` | LSTM weights + `feat_mean/std`, `active_cols`, `obs_len`, `threshold` | trained model |
 
 ### The single source of truth
@@ -160,6 +163,62 @@ JAAD annotations/*.xml + JAAD_clips/*.mp4
 by **all three** of the dataset builder, the trainer, and the live predictor — so
 training and inference can never silently disagree on channel order or leak the
 future.
+
+---
+
+## 🔍 Detector: YOLOv8 / YOLO11 vs RT-DETR
+
+The live-video path's detector is switchable via `config.DETECTOR_BACKEND`
+(`"rtdetr"` default, `"yolo11"`, `"yolov8"`). The upgrade from YOLOv8 to RT-DETR
+is the "more adaptable algorithm" change referenced throughout the code
+(`modules/detector.py`).
+
+> **Important — this does not affect the intent metrics.** JAAD mode **bypasses
+> the detector entirely** and feeds ground-truth boxes straight through
+> (`detector.py` → `detect_from_jaad_annotations`, confidence `1.0`). So the
+> crossing-intent results table above was produced on GT boxes and is
+> **independent of the detector backbone**. The detector choice only changes
+> live/deployment inference on raw dashcam video, never the reported accuracy.
+
+### Architectural comparison (what actually differs)
+
+| Axis | YOLOv8 / YOLO11 | RT-DETR |
+|---|---|---|
+| Family | Anchor-free **CNN** single-stage | **Transformer** encoder–decoder (DETR-style) |
+| Post-processing | Needs **NMS** (tune IoU/conf) | **NMS-free** set prediction — no duplicate-box heuristics |
+| Crowding / occlusion | NMS can suppress overlapping pedestrians | Global attention + set matching handles overlap better |
+| Tuning surface | anchor/NMS thresholds | fewer hand-tuned knobs |
+| Cost | very light (nano checkpoints) | heavier (L-scale backbone) |
+
+The switch is motivated in `detector.py:22-27`: RT-DETR is NMS-free and stronger
+under occlusion and crowding — the common failure mode for pedestrians partially
+hidden behind cars, exactly the ADAS-relevant case.
+
+### Published benchmark figures (COCO val2017, Ultralytics)
+
+These are the **model checkpoints this repo actually loads**. Numbers are the
+official Ultralytics figures — **published references, not measured on JAAD in
+this repo** — and are a capacity comparison as much as an architecture one (the
+default is an **L**-scale RT-DETR vs **nano** YOLO checkpoints):
+
+| Checkpoint (repo default in **bold**) | mAP val 50-95 | Params (M) | FLOPs (B) | Speed |
+|---|---|---|---|---|
+| `yolov8n.pt` | 37.3 | 3.2 | 8.7 | 80.4 ms CPU-ONNX · 0.99 ms A100-TRT |
+| `yolo11n.pt` | 39.5 | 2.6 | 6.5 | 56.1 ms CPU-ONNX · 1.5 ms T4-TRT |
+| **`rtdetr-l.pt`** | **53.0** | ~42 | ~136 | 114 FPS on T4 |
+
+> The RT-DETR model page lists **53.0 AP / 114 FPS (T4)**; the Ultralytics
+> RT-DETR-vs-YOLOv8 comparison page lists **53.4 AP, 42 M params, 136 B FLOPs**
+> for the same L model — cited as found, the small AP difference is a
+> page-to-page inconsistency on Ultralytics' side. Takeaway: RT-DETR-l is
+> **~15 mAP more accurate** than the nano YOLO detectors but **an order of
+> magnitude heavier** in params/FLOPs, which is why the lighter YOLO backbones
+> remain selectable for throughput-constrained deployment.
+
+Sources: [Ultralytics RT-DETR](https://docs.ultralytics.com/models/rtdetr/),
+[YOLO11](https://docs.ultralytics.com/models/yolo11/),
+[YOLOv8](https://docs.ultralytics.com/models/yolov8/),
+[RT-DETR vs YOLOv8](https://docs.ultralytics.com/compare/rtdetr-vs-yolov8/).
 
 ---
 
@@ -283,20 +342,54 @@ that non-causal behaviour has been removed.)
 Pose features are scale-normalised by bbox height and mirrored to ego-lateral
 coordinates so left- and right-approaching pedestrians share one representation.
 
-**Model.** 2-layer LSTM over the observation window → sigmoid. Trained in PyTorch,
-exported to NumPy `.npz` (weights + normalisation stats + active-feature columns +
-calibrated threshold) so inference needs no PyTorch. Model selection is by
-validation ROC-AUC and the operating threshold is calibrated for max
-balanced-accuracy on the validation split. Training uses a focal loss (γ=2) to
-focus on the rare crossing-onset events.
+**Model.** A 2-layer LSTM (dropout 0.3) over the observation window → a single
+sigmoid logit. Trained in PyTorch, exported to NumPy `.npz` (weights +
+normalisation stats + active-feature columns + calibrated threshold) so inference
+needs no PyTorch. Model selection is by validation ROC-AUC (threshold-free, so it
+is robust to the tiny, imbalanced val sets JAAD track-level splits produce), and
+the operating threshold is then calibrated for max balanced-accuracy on the
+validation split so the deployed model never collapses to predicting one class.
+
+**Architecture & hyperparameters (exact).**
+
+| Item | Value |
+|---|---|
+| LSTM | 2 layers, hidden 64 (deployable, `config.INTENT_HIDDEN_SIZE`) / 96 (comparison run) |
+| Regularisation | dropout 0.3, weight-decay 1e-4, grad-clip 1.0 |
+| Optimiser | Adam, lr 3e-4, `ReduceLROnPlateau`(patience 5, factor 0.5) |
+| Batch / sampling | batch 64, class-balanced `WeightedRandomSampler` |
+| Early stopping | patience 15 epochs on val ROC-AUC |
+| Input dims | 18 active channels (8 kinematic + 10 pose); 20 allocated (2 aux off) |
+| Observation / horizon | `OBS_LEN=16` steps observed, `TTE=15` steps predicted |
+
+**Two loss functions, two purposes (do not confuse them).**
+- The **deployable trainer** (`train_intent.py`) uses class-weighted
+  `BCEWithLogitsLoss` (`pos_weight = min(neg/pos, 5.0)`) plus the balanced
+  sampler — this produces the shipped `checkpoints/intent_model.npz`.
+- The **comparison harness** (`compare_models.py`), which generated the results
+  table below, uses a **focal BCE loss (γ=2, `pos_weight` cap 8.0)** to
+  down-weight easy negatives and focus on the rare crossing-onset events. All
+  three feature sets in the table share this identical loss, so the reported
+  differences are attributable to features, not to the objective.
 
 ### Results
 
-Full **150 JAAD videos · 190 pedestrian tracks · 5-fold cross-validation**, with
-out-of-fold predictions pooled so every track is tested exactly once (2,528 test
-windows, 596 positive). Crossing-onset task, leak-free. Threshold metrics are
-reported at a **common operating recall of 0.871** (the baseline's own point, so
-the baseline is not handicapped); ROC-AUC and AP are threshold-free.
+**Evaluation setup (all numbers traceable to `output/comparison_report.md`):**
+
+| Property | Value |
+|---|---|
+| Videos | 150 JAAD clips |
+| Pedestrian tracks | 190 (with a valid pre-crossing prediction point) |
+| Cross-validation | 5-fold, **split at track level** (no window leaks across folds) |
+| Pooled test windows | 2,528 out-of-fold (every track tested exactly once) |
+| Positive windows | 596 → **23.6% positive rate** (the AP "chance" line) |
+| Observation window | 16 timeline steps ≈ **1.6 s** at ~10 fps |
+| Prediction horizon (TTE) | 15 timeline steps ≈ **1.5 s** ahead |
+| Reporting operating point | common recall **0.871** (the baseline's own point) |
+
+Crossing-onset task, leak-free. Threshold metrics are reported at that common
+recall so the baseline is not handicapped; ROC-AUC and AP are threshold-free.
+Note the 23.6% base rate: an AP of 0.476 is roughly **2×** the 0.236 chance line.
 
 | Feature set | ROC-AUC | Avg-Prec | Accuracy | Bal-Acc | Precision | Recall | F1 | AUC (mean ± std) |
 |---|---|---|---|---|---|---|---|---|
@@ -322,12 +415,20 @@ python -m datasets.build_jaad_features --videos 150            # pose + kinemati
 python -m datasets.build_jaad_features --videos 150 --no-pose  # kinematics only (fast)
 
 # 2. Cross-validated before/after comparison (table + all figures)
-python compare_models.py --videos 150 --folds 5
+#    NOTE: the published table was generated at hidden=96 (the compare_models
+#    default), NOT the deployable default of config.INTENT_HIDDEN_SIZE=64.
+python compare_models.py --videos 150 --folds 5 --hidden 96 --epochs 150
 
-# 3. Train the deployable model and evaluate it
+# 3. Train the deployable model and evaluate it (ships hidden=64)
 python train_intent.py --videos 150 --pose      # body-language + trajectory
 python evaluate.py --videos 150
 ```
+
+> **Reproducibility note.** The results table above comes from `compare_models.py`
+> at `--hidden 96 --epochs 150`, focal loss, 5-fold CV. The deployable model from
+> `train_intent.py` ships at `hidden=64` (`config.INTENT_HIDDEN_SIZE`) with a
+> 70/15/15 track-level split and class-weighted BCE — so its single-split test
+> numbers will differ slightly from the pooled CV table. Both are seeded (`42`).
 
 > **Data scale matters.** JAAD track-level splits are small; on only ~40 videos
 > the held-out set is ~8 tracks and metrics are noisy. Use ≥150 videos for stable
