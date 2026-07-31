@@ -1,12 +1,14 @@
-# 🚗 ADAS Sensor Data Cleaning & Behavior Analysis Pipeline
+# 🚗 ADAS Pedestrian Crossing-Intent Prediction
 
-An end-to-end ML pipeline that ingests dashcam or surveillance video, detects and tracks road agents, classifies behaviors, scores danger, and produces annotated video output — all accessible through a live web UI.
+A real-time perception pipeline that **predicts whether a pedestrian is about to cross ~1.5 s ahead** — not just reacting to current motion — by fusing body-pose and trajectory in a leak-free temporal model. Pose + trajectory fusion lifts crossing-onset **ROC-AUC from 0.730 → 0.781** over a trajectory-only baseline (5-fold cross-validation on 150 JAAD videos) and more than halves fold-to-fold variance.
+
+The full system ingests dashcam or surveillance video, detects and tracks road agents (RT-DETR + ByteTrack), estimates pose, predicts crossing intent, scores danger, and renders annotated video — all through a live FastAPI web UI. Modular, checkpointed, and resumable.
 
 ---
 
 ## 📌 Overview
 
-This project evolved from `intent_fusion.py`, a prototype script that ran YOLOv8 on `.MOV` dashcam clips to flag moving pedestrians as dangerous. The full pipeline is the production system built on that idea — modular, resumable, and multi-output.
+This project began as `intent_fusion.py`, a prototype that ran YOLOv8 on dashcam clips to flag *currently* moving pedestrians. It has since become a production-style pipeline whose core capability is **prediction, not reaction** — anticipating a crossing before it happens, which is the event that actually matters for an ADAS warning. Modular, resumable, and multi-output.
 
 **Input:** Raw dashcam video or JAAD dataset clips  
 **Output:** Annotated MP4 video · `dataset.json` · `dataset.csv` · PASCAL VOC XML annotations
@@ -21,7 +23,7 @@ Input Video / JAAD Dataset
         ▼
 ┌──────────────────────────────────────────┐
 │         PipelineRunner (orchestrator)    │
-│  · Runs 8 stages in sequence             │
+│  · Runs 10 stages in sequence            │
 │  · Checkpoints after each stage          │
 │  · Supports resume on failure            │
 └──────────────────────────────────────────┘

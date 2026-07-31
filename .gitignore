@@ -26,6 +26,7 @@ env/
 
 # Local tool/editor config — never commit
 *.lnk
+.claude/
 
 # Extracted JAAD frames / pose cache (regenerated from clips)
 Pedistrian_intent_detection/JAAD/images/
