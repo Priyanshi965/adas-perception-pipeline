@@ -409,6 +409,20 @@ bar, training curves, ablation, early-prediction). No ground-truth `look`/`actio
 labels are used as inputs — only pose keypoints and trajectory, both available in
 a real vehicle.
 
+### Results at a glance
+
+**Before → after: fusing pose with trajectory dominates the trajectory-only baseline on every metric** (5-fold cross-validation).
+
+![ROC comparison — pose+trajectory vs trajectory-only](docs/roc_comparison.png)
+
+![Metrics by feature set](docs/metrics_bar.png)
+
+**How early can it warn?** Accuracy as a function of time-to-event — the metric that actually matters for an ADAS warning system (higher = correct further ahead of the crossing):
+
+![Early-prediction accuracy vs time-to-event](docs/early_prediction.png)
+
+*Full figure set (PR curves, confusion matrices, ablation, training curves) is regenerated into `output/plots/comparison/` by `compare_models.py`.*
+
 ### Reproduce
 
 ```bash
@@ -525,4 +539,19 @@ adas_pipeline/
 ├── exporter.py · visualizer.py · xml_exporter.py
 ├── main.py · preview.py · config.py
 ```
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE) — free to use, modify, and distribute with attribution.
+
+## Author
+
+**Priyanshi Kochar** — [GitHub](https://github.com/Priyanshi965)
+
+## Acknowledgements
+
+- **JAAD** (Joint Attention in Autonomous Driving) dataset — Rasouli et al., for pedestrian crossing-intent annotations.
+- **Ultralytics** — RT-DETR, YOLO11, and YOLO-pose model implementations and pretrained weights.
 
