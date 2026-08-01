@@ -126,6 +126,33 @@ def export_npz(net, path, mean, std, cols, args, threshold=0.5):
 
 # ─── Train ────────────────────────────────────────────────────────────────────
 
+def calibrate_threshold(y, p, min_recall=0.7):
+    """Pick an operating threshold that maximises F1 subject to recall >= min_recall.
+
+    Returns None if y is single-class (caller should calibrate elsewhere). Falls
+    back to max balanced-accuracy if the recall floor is unreachable. This prevents
+    the model from being deployed at a threshold where it predicts only one class.
+    """
+    if len(np.unique(y)) < 2:
+        return None
+    from sklearn.metrics import f1_score, recall_score, balanced_accuracy_score
+    cand = np.unique(np.round(p, 3))
+    cand = cand[(cand > p.min()) & (cand < p.max())]
+    if len(cand) == 0:
+        return 0.5
+    best_t, best_f1 = None, -1.0
+    for t in cand:
+        pred = (p >= t).astype(int)
+        if recall_score(y, pred, zero_division=0) < min_recall:
+            continue
+        f = f1_score(y, pred, zero_division=0)
+        if f > best_f1:
+            best_f1, best_t = f, t
+    if best_t is None:
+        best_t = max((balanced_accuracy_score(y, (p >= t).astype(int)), t) for t in cand)[1]
+    return float(best_t)
+
+
 def train(args):
     torch, nn = _import_torch()
     torch.manual_seed(args.seed); np.random.seed(args.seed); random.seed(args.seed)
@@ -156,20 +183,31 @@ def train(args):
     X_tr, X_va, X_te = norm(X_tr), norm(X_va), norm(X_te)
 
     n_pos = max(int(y_tr.sum()), 1); n_neg = max(len(y_tr) - n_pos, 1)
-    pos_weight = torch.tensor([min(n_neg / n_pos, 5.0)], dtype=torch.float32)
+    # Single imbalance mechanism: focal loss with a mild pos_weight cap. Previously
+    # a class-balanced sampler AND pos_weight<=5 both compensated at once, biasing
+    # the model toward positive and collapsing its probabilities into a narrow band.
+    pos_weight = torch.tensor([min(n_neg / n_pos, 2.0)], dtype=torch.float32)
+
+    class FocalLoss(nn.Module):
+        def __init__(self, gamma=2.0, pos_weight=None):
+            super().__init__(); self.gamma = gamma; self.pos_weight = pos_weight
+        def forward(self, logits, targets):
+            bce = nn.functional.binary_cross_entropy_with_logits(
+                logits, targets, pos_weight=self.pos_weight, reduction="none")
+            p = torch.sigmoid(logits)
+            p_t = p * targets + (1 - p) * (1 - targets)
+            return ((1 - p_t) ** self.gamma * bce).mean()
 
     net = build_net(len(cols), args.hidden)
-    crit = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    crit = FocalLoss(gamma=2.0, pos_weight=pos_weight)
     opt = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, patience=5, factor=0.5)
 
     Xt = torch.tensor(X_tr); yt = torch.tensor(y_tr)
     Xv = torch.tensor(X_va); yv = torch.tensor(y_va)
     ds = torch.utils.data.TensorDataset(Xt, yt)
-    # class-balanced sampler
-    w = np.where(y_tr == 1, len(y_tr) / (2 * n_pos), len(y_tr) / (2 * n_neg))
-    sampler = torch.utils.data.WeightedRandomSampler(torch.tensor(w, dtype=torch.float32), len(y_tr), True)
-    loader = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, sampler=sampler)
+    # Plain shuffled loader — focal loss handles imbalance; no balanced sampler.
+    loader = torch.utils.data.DataLoader(ds, batch_size=args.batch_size, shuffle=True)
 
     from copy import deepcopy
     from sklearn.metrics import (accuracy_score, precision_score, recall_score,
@@ -210,15 +248,19 @@ def train(args):
     net.eval()
     with torch.no_grad():
         vprob = torch.sigmoid(net(Xv)).numpy()
-    # Calibrate by max balanced-accuracy, not F1: with a positive-heavy val set,
-    # max-F1 rewards predicting everything positive and collapses the threshold.
-    thr = 0.5
-    if len(np.unique(y_va)) > 1:
-        from sklearn.metrics import balanced_accuracy_score
-        cand = np.unique(np.clip(vprob, 0.05, 0.95))
-        scores = [(balanced_accuracy_score(y_va, (vprob >= t).astype(int)), t) for t in cand]
-        thr = max(scores)[1] if scores else 0.5
-    logger.info(f"Calibrated threshold (val, max balanced-acc): {thr:.3f}")
+    # Calibrate the operating threshold: maximise F1 subject to a minimum-recall
+    # floor (prevents collapse to all-negative), falling back to max balanced-acc
+    # if the floor is unreachable. If val is single-class, calibrate on TRAIN
+    # instead of silently defaulting to 0.5.
+    thr = calibrate_threshold(y_va, vprob)
+    if thr is None:
+        with torch.no_grad():
+            tprob = torch.sigmoid(net(torch.tensor(X_tr))).numpy()
+        thr = calibrate_threshold(y_tr, tprob) or 0.5
+        logger.warning("val single-class — threshold calibrated on TRAIN split")
+    logger.info(f"Calibrated threshold: {thr:.3f}")
+    logger.info(f"Val prob spread: min={vprob.min():.3f} med={np.median(vprob):.3f} "
+                f"max={vprob.max():.3f}  |  frac>=thr={(vprob >= thr).mean():.3f}")
     export_npz(net, config.INTENT_MODEL_PATH, mean, std, cols, args, threshold=float(thr))
     torch.save(net.state_dict(), config.INTENT_MODEL_PATH + ".pt")
 

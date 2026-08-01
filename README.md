@@ -437,8 +437,15 @@ python compare_models.py --videos 150 --folds 5 --hidden 96 --epochs 150
 
 # 3. Train the deployable model and evaluate it (ships hidden=64)
 python train_intent.py --videos 150 --pose      # body-language + trajectory
-python evaluate.py --videos 150
+python evaluate.py --videos 150 --threshold 0.65   # canonical single-split run
 ```
+
+> **Single-split evaluation is now persisted.** `evaluate.py` writes
+> `results/eval_report.json`, `results/eval_report.md`, and the paper figures
+> into `results/` (see `results/README.md`). The canonical paper run is
+> `python evaluate.py --videos 150 --threshold 0.65` — `--videos 150` gives the
+> 393-window test set behind the reported confusion matrix, and `--threshold 0.65`
+> is the paper's operating point (the shipped model's baked threshold is 0.500).
 
 > **Reproducibility note.** The results table above comes from `compare_models.py`
 > at `--hidden 96 --epochs 150`, focal loss, 5-fold CV. The deployable model from

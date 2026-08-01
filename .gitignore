@@ -26,7 +26,6 @@ env/
 
 # Local tool/editor config — never commit
 *.lnk
-.claude/
 
 # Extracted JAAD frames / pose cache (regenerated from clips)
 Pedistrian_intent_detection/JAAD/images/
@@ -40,3 +39,7 @@ adas_pipeline/input/
 *.docx
 *.pdf
 pipeline_diagram.png
+
+# Legacy PyTorch checkpoints (superseded by intent_model.npz)
+*.pth
+results/confidence_dist.png
