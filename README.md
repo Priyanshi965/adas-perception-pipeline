@@ -1,5 +1,8 @@
 # 🚗 ADAS Pedestrian Crossing-Intent Prediction
 
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
+
 A real-time perception pipeline that **predicts whether a pedestrian is about to cross ~1.5 s ahead** — not just reacting to current motion — by fusing body-pose and trajectory in a leak-free temporal model. Pose + trajectory fusion lifts crossing-onset **ROC-AUC from 0.730 → 0.781** over a trajectory-only baseline (5-fold cross-validation on 150 JAAD videos) and more than halves fold-to-fold variance.
 
 The full system ingests dashcam or surveillance video, detects and tracks road agents (RT-DETR + ByteTrack), estimates pose, predicts crossing intent, scores danger, and renders annotated video — all through a live FastAPI web UI. Modular, checkpointed, and resumable.
