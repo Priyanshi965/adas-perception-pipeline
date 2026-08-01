@@ -349,8 +349,8 @@ sigmoid logit. Trained in PyTorch, exported to NumPy `.npz` (weights +
 normalisation stats + active-feature columns + calibrated threshold) so inference
 needs no PyTorch. Model selection is by validation ROC-AUC (threshold-free, so it
 is robust to the tiny, imbalanced val sets JAAD track-level splits produce), and
-the operating threshold is then calibrated for max balanced-accuracy on the
-validation split so the deployed model never collapses to predicting one class.
+the operating threshold is then calibrated to maximise F1 subject to recall ≥ 0.70
+on the validation split so the deployed model never collapses to predicting one class.
 
 **Architecture & hyperparameters (exact).**
 
