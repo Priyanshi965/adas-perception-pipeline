@@ -139,8 +139,8 @@ JAAD annotations/*.xml + JAAD_clips/*.mp4
   │      sample only where the pedestrian is NOT yet crossing; label = does a
   │      crossing BEGIN within the next TTE steps? Split at TRACK level.
   │
-  ├─ train_intent.py            2-layer LSTM, class-weighted BCE + balanced sampler,
-  │      early-stop on val ROC-AUC, threshold calibrated on validation; exports
+  ├─ train_intent.py            2-layer LSTM, focal loss (γ=2, shuffled loader),
+  │      early-stop on val ROC-AUC, recall-calibrated threshold on validation; exports
   │      NumPy .npz (weights + norm stats + active columns + threshold) so
   │      inference needs no PyTorch.
   │
@@ -359,20 +359,22 @@ validation split so the deployed model never collapses to predicting one class.
 | LSTM | 2 layers, hidden 64 (deployable, `config.INTENT_HIDDEN_SIZE`) / 96 (comparison run) |
 | Regularisation | dropout 0.3, weight-decay 1e-4, grad-clip 1.0 |
 | Optimiser | Adam, lr 3e-4, `ReduceLROnPlateau`(patience 5, factor 0.5) |
-| Batch / sampling | batch 64, class-balanced `WeightedRandomSampler` |
+| Batch / sampling | batch 64, plain shuffled loader (focal loss handles imbalance) |
 | Early stopping | patience 15 epochs on val ROC-AUC |
 | Input dims | 18 active channels (8 kinematic + 10 pose); 20 allocated (2 aux off) |
 | Observation / horizon | `OBS_LEN=16` steps observed, `TTE=15` steps predicted |
 
-**Two loss functions, two purposes (do not confuse them).**
-- The **deployable trainer** (`train_intent.py`) uses class-weighted
-  `BCEWithLogitsLoss` (`pos_weight = min(neg/pos, 5.0)`) plus the balanced
-  sampler — this produces the shipped `checkpoints/intent_model.npz`.
-- The **comparison harness** (`compare_models.py`), which generated the results
-  table below, uses a **focal BCE loss (γ=2, `pos_weight` cap 8.0)** to
-  down-weight easy negatives and focus on the rare crossing-onset events. All
-  three feature sets in the table share this identical loss, so the reported
-  differences are attributable to features, not to the objective.
+**Training objective.**
+- The **deployable trainer** (`train_intent.py`) uses a **focal BCE loss
+  (γ=2, `pos_weight` cap 2.0)** with a plain shuffled loader — a single imbalance
+  mechanism, not a balanced sampler *and* a large `pos_weight` stacked together
+  (that double-compensation biased the model positive and collapsed its
+  probabilities). The operating threshold is then calibrated on the validation
+  split to **maximise F1 subject to recall ≥ 0.70**, so the shipped
+  `checkpoints/intent_model.npz` never degenerates to predicting one class.
+- The **comparison harness** (`compare_models.py`), which generated the 5-fold
+  table below, uses the same focal objective across all three feature sets, so
+  the reported differences are attributable to features, not to the loss.
 
 ### Results
 
@@ -423,6 +425,41 @@ a real vehicle.
 
 *Full figure set (PR curves, confusion matrices, ablation, training curves) is regenerated into `output/plots/comparison/` by `compare_models.py`.*
 
+### Deployable model — single-split evaluation
+
+The shipped `checkpoints/intent_model.npz` (pose + trajectory, `hidden=64`) is
+evaluated on a held-out **15% track-level test split** — 38 tracks, **388
+windows**, 60 positive — at its calibrated operating threshold. All numbers
+regenerate into `results/eval_report.md` via
+`python adas_pipeline/evaluate.py --videos 150`.
+
+| Metric | Value |
+|---|---|
+| ROC-AUC | 0.806 |
+| Avg-Precision | 0.424 |
+| Accuracy | 0.807 |
+| Precision | 0.424 |
+| Recall | **0.700** |
+| F1 | 0.528 |
+| Operating threshold | 0.525 (calibrated for recall ≥ 0.70) |
+
+Confusion matrix (388 windows): **TN 271 · FP 57 · FN 18 · TP 42** — the model
+catches **42 of 60** crossing-onset windows. The threshold is deliberately tuned
+toward **recall**, since a missed crossing (false negative) is the
+safety-critical error for an ADAS; this trades some precision for coverage.
+
+![Confusion matrix — deployable model](results/confusion_matrix.png)
+
+![ROC curve — deployable model](results/roc_curve.png)
+
+![Precision–Recall curve — deployable model](results/pr_curve.png)
+
+![Early-prediction accuracy vs time-to-event — deployable model](results/early_prediction.png)
+
+> These single-split numbers are noisier than the pooled 5-fold table above (only
+> 38 test tracks) and describe the **deployable** `hidden=64` model at its
+> calibrated threshold — distinct from the `hidden=96` comparison run. Seeded (`42`).
+
 ### Reproduce
 
 ```bash
@@ -437,21 +474,20 @@ python compare_models.py --videos 150 --folds 5 --hidden 96 --epochs 150
 
 # 3. Train the deployable model and evaluate it (ships hidden=64)
 python train_intent.py --videos 150 --pose      # body-language + trajectory
-python evaluate.py --videos 150 --threshold 0.65   # canonical single-split run
+python evaluate.py --videos 150                    # evaluates at the calibrated threshold
 ```
 
-> **Single-split evaluation is now persisted.** `evaluate.py` writes
-> `results/eval_report.json`, `results/eval_report.md`, and the paper figures
-> into `results/` (see `results/README.md`). The canonical paper run is
-> `python evaluate.py --videos 150 --threshold 0.65` — `--videos 150` gives the
-> 393-window test set behind the reported confusion matrix, and `--threshold 0.65`
-> is the paper's operating point (the shipped model's baked threshold is 0.500).
+> **Single-split evaluation is persisted.** `evaluate.py` writes
+> `results/eval_report.json`, `results/eval_report.md`, and the figures into
+> `results/` (see `results/README.md`). Run `python adas_pipeline/evaluate.py
+> --videos 150`; it evaluates at the model's **own calibrated threshold** (no
+> manual override) and prints a full precision/recall threshold sweep.
 
-> **Reproducibility note.** The results table above comes from `compare_models.py`
+> **Reproducibility note.** The 5-fold table above comes from `compare_models.py`
 > at `--hidden 96 --epochs 150`, focal loss, 5-fold CV. The deployable model from
 > `train_intent.py` ships at `hidden=64` (`config.INTENT_HIDDEN_SIZE`) with a
-> 70/15/15 track-level split and class-weighted BCE — so its single-split test
-> numbers will differ slightly from the pooled CV table. Both are seeded (`42`).
+> 70/15/15 track-level split, focal loss, and a recall-calibrated threshold — so
+> its single-split test numbers differ from the pooled CV table. Both seeded (`42`).
 
 > **Data scale matters.** JAAD track-level splits are small; on only ~40 videos
 > the held-out set is ~8 tracks and metrics are noisy. Use ≥150 videos for stable
