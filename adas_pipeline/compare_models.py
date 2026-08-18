@@ -12,7 +12,9 @@ features, not sampling.
 
 Figures → output/plots/comparison/ :
   roc_comparison.png, pr_comparison.png, confusion_matrices.png,
-  metrics_bar.png, training_curves.png, ablation_auc.png, early_prediction.png
+  metrics_bar.png, training_curves.png, ablation_auc.png, early_prediction.png,
+  score.png (pose+traj confidence-score distribution, pooled OOF, at the operating
+  threshold — the reportable separation figure, drawn on the full CV split)
 Table → output/comparison_report.md
 
 Usage:
@@ -29,11 +31,13 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(ROOT)
 sys.path.insert(0, ROOT)
 
 import config
 from datasets import jaad_loader as jl
 from datasets import build_jaad_features as bjf
+from datasets import build_pie_features as bpf
 from modules import intent_features as ifeat
 from train_intent import split_tracks
 
@@ -77,6 +81,7 @@ def train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, epochs, hidden, seed):
     from sklearn.metrics import roc_auc_score, balanced_accuracy_score
     from train_intent import build_net
     torch.manual_seed(seed); np.random.seed(seed)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def sel(Ws):
         return np.stack(Ws)[:, :, cols].astype(np.float32) if Ws else np.empty((0, config.INTENT_OBS_LEN, len(cols)), np.float32)
@@ -86,8 +91,8 @@ def train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, epochs, hidden, seed):
 
     import torch.nn.functional as F
     npos = max(int(ytr.sum()), 1); nneg = max(len(ytr) - npos, 1)
-    net = build_net(len(cols), hidden)
-    pw = torch.tensor([min(nneg / npos, 8.0)], dtype=torch.float32)
+    net = build_net(len(cols), hidden).to(device)
+    pw = torch.tensor([min(nneg / npos, 8.0)], dtype=torch.float32).to(device)
 
     def crit(logits, targets, gamma=2.0):
         # focal BCE: down-weights easy examples, focuses on the rare hard onsets
@@ -101,17 +106,18 @@ def train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, epochs, hidden, seed):
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(torch.tensor(Xtr), torch.tensor(ytr)),
         batch_size=64, sampler=sampler)
-    Xv, yv = torch.tensor(Xva), torch.tensor(yva)
+    Xv, yv = torch.tensor(Xva).to(device), torch.tensor(yva).to(device)
 
     best_auc, best_state, patience, hist = -1, deepcopy(net.state_dict()), 0, []
     for ep in range(1, epochs + 1):
         net.train()
         for xb, yb in loader:
+            xb, yb = xb.to(device), yb.to(device)
             opt.zero_grad(); loss = crit(net(xb), yb); loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0); opt.step()
         net.eval()
         with torch.no_grad():
-            vprob = torch.sigmoid(net(Xv)).numpy()
+            vprob = torch.sigmoid(net(Xv)).cpu().numpy()
         vauc = roc_auc_score(yva, vprob) if len(np.unique(yva)) > 1 else 0.5
         hist.append(vauc)
         if vauc > best_auc + 1e-4:
@@ -122,8 +128,9 @@ def train_eval(Wtr, ytr, Wva, yva, Wte, yte, cols, epochs, hidden, seed):
                 break
     net.load_state_dict(best_state); net.eval()
     with torch.no_grad():
-        vprob = torch.sigmoid(net(Xv)).numpy()
-        te_prob = torch.sigmoid(net(torch.tensor(Xte))).numpy() if len(Xte) else np.array([])
+        vprob = torch.sigmoid(net(Xv)).cpu().numpy()
+        te_prob = (torch.sigmoid(net(torch.tensor(Xte).to(device))).cpu().numpy()
+                   if len(Xte) else np.array([]))
     thr = 0.5
     if len(np.unique(yva)) > 1:
         cand = np.unique(np.clip(vprob, 0.05, 0.95))
@@ -238,6 +245,23 @@ def make_plots(results, yte, ttes):
     plt.xlabel("time-to-crossing (timeline steps ahead)"); plt.ylabel("recall on imminent crossings")
     plt.title("Early-prediction: how far ahead are we right?"); plt.ylim(0, 1.05); plt.legend(); plt.grid(alpha=0.3)
     plt.tight_layout(); plt.savefig(os.path.join(OUT, "early_prediction.png"), dpi=150); plt.close()
+
+    # Confidence-score distribution for the fusion model, drawn on the SAME pooled
+    # out-of-fold windows and the SAME operating threshold as every figure above —
+    # so it reports separation at scale (~all windows), not on a tiny single split.
+    if "pose+traj" in results:
+        r = results["pose+traj"]; probs = r["probs"]; thr = r["thr"]
+        bins = np.linspace(0, 1, 21)
+        plt.figure(figsize=(7, 4.5))
+        plt.hist(probs[yte == 0], bins=bins, alpha=0.6, label="Not Crossing", color="#8a9bb0")
+        if (yte == 1).any():
+            plt.hist(probs[yte == 1], bins=bins, alpha=0.6, label="Crossing", color="#f28e8e")
+        plt.axvline(thr, color="k", ls="--", lw=1.2, label=f"operating threshold = {thr:.2f}")
+        plt.xlabel("Predicted Crossing Probability"); plt.ylabel("Window count")
+        plt.title("Confidence-score distribution (pose+traj, pooled OOF)")
+        plt.legend(); plt.grid(axis="y", alpha=0.3)
+        plt.tight_layout(); plt.savefig(os.path.join(OUT, "score.png"), dpi=150); plt.close()
+
     logger.info(f"Figures saved → {OUT}")
 
 
@@ -284,11 +308,16 @@ def cross_validate(tracks, cols, k, epochs, hidden, seed):
 
 
 def write_table(results, meta):
-    path = os.path.join(config.OUTPUT_DIR, "comparison_report.md")
+    path = meta.get("report_path", os.path.join(config.OUTPUT_DIR, "comparison_report.md"))
     keys = ["AUC", "AP", "Accuracy", "BalancedAcc", "Precision", "Recall", "F1"]
-    lines = ["# Crossing-Intent Model — Before/After Comparison", "",
-             f"- Dataset: {meta['videos']} JAAD videos, {meta['tracks']} pedestrian tracks "
-             f"({meta['folds']}-fold cross-validation, split at track level)",
+    if meta["dataset"] == "pie":
+        ds_line = (f"- Dataset: PIE (sets set01/02/05), {meta['tracks']} pedestrian tracks "
+                   f"({meta['folds']}-fold cross-validation, split at track level)")
+    else:
+        ds_line = (f"- Dataset: {meta['videos']} JAAD videos, {meta['tracks']} pedestrian tracks "
+                   f"({meta['folds']}-fold cross-validation, split at track level)")
+    lines = [f"# Crossing-Intent Model — Before/After Comparison ({meta['dataset'].upper()})", "",
+             ds_line,
              f"- Task: crossing-**onset** prediction, observe {config.INTENT_OBS_LEN} steps → "
              f"predict within {config.INTENT_TTE} steps (leak-free)",
              f"- Evaluation: {meta['n_test']} out-of-fold test windows ({meta['test_pos']} positive), "
@@ -305,8 +334,9 @@ def write_table(results, meta):
         fa = r.get("fold_auc", (float("nan"), 0.0))
         lines.append(f"| {labelmap.get(name, name)} | " + " | ".join(row) +
                      f" | {fa[0]:.3f} ± {fa[1]:.3f} |")
-    lines += ["", f"Generated from `compare_models.py` ({meta['folds']}-fold CV). "
-                  f"Figures in `output/plots/comparison/`."]
+    fig_dir = "results_pie/ (cmp_*.png)" if meta["dataset"] == "pie" else "output/plots/comparison/"
+    lines += ["", f"Generated from `compare_models.py --dataset {meta['dataset']}` "
+                  f"({meta['folds']}-fold CV). Figures in `{fig_dir}`."]
     open(path, "w", encoding="utf-8").write("\n".join(lines))
     logger.info(f"Table → {path}")
     return path, lines
@@ -325,7 +355,10 @@ def threshold_for_recall(probs, y, target):
 
 
 def main():
+    global OUT
     ap = argparse.ArgumentParser()
+    ap.add_argument("--dataset", choices=["jaad", "pie"], default="jaad",
+                    help="jaad (flat clips, --videos) or pie (3-set subset, all tracks)")
     ap.add_argument("--videos", type=int, default=150)
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--hidden", type=int, default=96)
@@ -335,10 +368,17 @@ def main():
                     help="report each model at its own threshold instead of a common recall")
     args = ap.parse_args()
 
-    vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
-    tracks = bjf.build_dataset(vids, with_pose=True, force=False)
+    # Dataset-specific output dirs so PIE and JAAD comparisons never clobber.
+    if args.dataset == "pie":
+        OUT = os.path.join(config.OUTPUT_DIR, "plots", "comparison_pie")
+        report_path = os.path.join(REPO_ROOT, "results_pie", "comparison_report.md")
+        tracks = bpf.build_dataset(with_pose=True, set_ids=None, force=False)
+    else:
+        report_path = os.path.join(config.OUTPUT_DIR, "comparison_report.md")
+        vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
+        tracks = bjf.build_dataset(vids, with_pose=True, force=False)
     tracks = [t for t in tracks if (t["cross"] == 0).any()]  # need prediction points
-    logger.info(f"Tracks {len(tracks)} | {args.folds}-fold CV")
+    logger.info(f"[{args.dataset}] Tracks {len(tracks)} | {args.folds}-fold CV")
 
     results, yref, tteref = {}, None, None
     for name, cfg in CONFIGS.items():
@@ -367,9 +407,21 @@ def main():
         logger.info(f"Matched operating recall = {op_recall:.3f}")
 
     make_plots(results, yref, tteref)
-    meta = dict(videos=args.videos, tracks=len(tracks), folds=args.folds,
+    meta = dict(dataset=args.dataset, report_path=report_path, videos=args.videos,
+                tracks=len(tracks), folds=args.folds,
                 n_test=len(yref), test_pos=int(yref.sum()), op_recall=op_recall)
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
     _, lines = write_table(results, meta)
+    # For PIE, also drop the comparison figures next to the report for the writeup.
+    if args.dataset == "pie":
+        import shutil
+        dst = os.path.dirname(report_path)
+        for name in ("roc_comparison.png", "pr_comparison.png", "ablation_auc.png",
+                     "metrics_bar.png", "early_prediction.png", "confusion_matrices.png",
+                     "training_curves.png", "score.png"):
+            src = os.path.join(OUT, name)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(dst, "cmp_" + name))
     print("\n".join(lines))
 
 

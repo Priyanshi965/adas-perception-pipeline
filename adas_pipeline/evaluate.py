@@ -12,7 +12,8 @@ the same leak-free observe→predict windowing as training, and reports:
   • Efficiency: inference latency, throughput, and model file size
 
 Plots (output/plots/): roc_curve.png, pr_curve.png, confusion_matrix.png,
-early_prediction.png.
+early_prediction.png, score.png (confidence-score distribution at the calibrated
+threshold).
 
 For the pose-vs-baseline ablation, train two models and evaluate each:
   python train_intent.py --videos 40 --no-pose   &&  python evaluate.py
@@ -42,6 +43,7 @@ sys.path.insert(0, ROOT)
 import config
 from datasets import jaad_loader as jl
 from datasets import build_jaad_features as bjf
+from datasets import build_pie_features as bpf
 from modules import intent_features as ifeat
 from modules.intent_predictor import IntentPredictor
 from train_intent import split_tracks
@@ -128,6 +130,18 @@ def save_plots(probs, labels, thr, early):
         plt.xlabel("Time-to-event (timeline steps ahead)"); plt.ylabel("Accuracy on crossings")
         plt.title("Early-prediction accuracy"); plt.ylim(0, 1)
         plt.savefig(os.path.join(PLOTS_DIR, "early_prediction.png"), dpi=120); plt.close()
+
+    # Confidence-score distribution at the CALIBRATED threshold (not a hard-coded 0.65).
+    bins = np.linspace(0, 1, 21)
+    plt.figure()
+    plt.hist(probs[labels == 0], bins=bins, alpha=0.6, label="Not Crossing", color="#8a9bb0")
+    if (labels == 1).any():
+        plt.hist(probs[labels == 1], bins=bins, alpha=0.6, label="Crossing", color="#f28e8e")
+    plt.axvline(thr, color="k", ls="--", lw=1.2, label=f"threshold = {thr:.2f}")
+    plt.xlabel("Predicted Crossing Probability"); plt.ylabel("Count")
+    plt.title("Confidence Score Distribution"); plt.legend()
+    plt.savefig(os.path.join(PLOTS_DIR, "score.png"), dpi=120); plt.close()
+
     logger.info(f"Plots saved → {PLOTS_DIR}")
 
 
@@ -143,11 +157,16 @@ def write_report(metrics, args, use_pose, thr, thr_src):
     import datetime
     out_dir = args.out or os.path.join(REPO_ROOT, "results")
     os.makedirs(out_dir, exist_ok=True)
-    cmd = (f"python adas_pipeline/evaluate.py --videos {args.videos} --seed {args.seed}"
-           + (f" --threshold {args.threshold}" if args.threshold is not None else ""))
+    if args.dataset == "pie":
+        cmd = f"python adas_pipeline/evaluate.py --dataset pie --seed {args.seed}"
+    else:
+        cmd = f"python adas_pipeline/evaluate.py --videos {args.videos} --seed {args.seed}"
+    if args.threshold is not None:
+        cmd += f" --threshold {args.threshold}"
     meta = {
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "command": cmd,
+        "dataset": args.dataset,
         "videos": args.videos,
         "seed": args.seed,
         "threshold": float(thr),
@@ -160,12 +179,13 @@ def write_report(metrics, args, use_pose, thr, thr_src):
         json.dump({"meta": meta, "metrics": metrics}, f, indent=2)
 
     cm = metrics["confusion"]
+    ds_label = "PIE (sets set01/02/05)" if meta["dataset"] == "pie" else f"JAAD ({meta['videos']} videos)"
     lines = [
-        "# Crossing-Intent Model — Single-Split Evaluation",
+        f"# Crossing-Intent Model ({meta['features']}, {meta['dataset'].upper()}) — Single-Split Evaluation",
         "",
         f"- Generated: {meta['generated']}",
         f"- Command: `{meta['command']}`",
-        f"- Videos: {meta['videos']} · Seed: {meta['seed']} · Features: {meta['features']}",
+        f"- Dataset: {ds_label} · Seed: {meta['seed']} · Features: {meta['features']}",
         f"- Observation window: {meta['obs_len']} steps · Prediction horizon (TTE): {meta['tte']} steps",
         f"- Operating threshold: {meta['threshold']:.3f} ({meta['threshold_source']})",
         f"- Samples: {metrics['samples']} (positives {metrics['positives']})",
@@ -194,7 +214,7 @@ def write_report(metrics, args, use_pose, thr, thr_src):
         f.write("\n".join(lines) + "\n")
 
     for name in ("roc_curve.png", "pr_curve.png", "confusion_matrix.png",
-                 "early_prediction.png"):
+                 "early_prediction.png", "score.png"):
         src_png = os.path.join(PLOTS_DIR, name)
         if os.path.exists(src_png):
             shutil.copy2(src_png, os.path.join(out_dir, name))
@@ -203,23 +223,36 @@ def write_report(metrics, args, use_pose, thr, thr_src):
 
 def main():
     ap = argparse.ArgumentParser(description="Evaluate crossing-intent model")
+    ap.add_argument("--dataset", choices=["jaad", "pie"], default="jaad",
+                    help="jaad (flat clips, --videos) or pie (3-set subset, all tracks)")
     ap.add_argument("--videos", type=int, default=40)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--threshold", type=float, default=None,
                     help="Operating threshold override; default uses the model's calibrated threshold.")
     ap.add_argument("--out", type=str, default=None,
-                    help="Dir for eval_report.json/.md + copied figures (default: <repo>/results).")
+                    help="Dir for eval_report.json/.md + copied figures (default: <repo>/results[_pie]).")
     args = ap.parse_args()
 
-    predictor = IntentPredictor()
-    if predictor.model is None:
-        logger.error("No trained model at config.INTENT_MODEL_PATH — run train_intent.py first.")
-        sys.exit(1)
-    use_pose = bool(int(np.load(config.INTENT_MODEL_PATH)["use_pose"]))
-    logger.info(f"Evaluating model (features: {'POSE+KIN' if use_pose else 'KIN only'})")
+    # Dataset-specific model file + report dir so PIE and JAAD never clobber each other.
+    model_path = config.INTENT_MODEL_PATH
+    if args.dataset == "pie":
+        base, ext = os.path.splitext(config.INTENT_MODEL_PATH)
+        model_path = base + "_pie" + ext
+        if args.out is None:
+            args.out = os.path.join(REPO_ROOT, "results_pie")
 
-    vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
-    tracks = bjf.build_dataset(vids, with_pose=use_pose, force=False)
+    predictor = IntentPredictor(model_path=model_path)
+    if predictor.model is None:
+        logger.error(f"No trained model at {model_path} — run train_intent.py --dataset {args.dataset} first.")
+        sys.exit(1)
+    use_pose = bool(int(np.load(model_path)["use_pose"]))
+    logger.info(f"Evaluating {args.dataset} model (features: {'POSE+KIN' if use_pose else 'KIN only'})")
+
+    if args.dataset == "pie":
+        tracks = bpf.build_dataset(with_pose=use_pose, set_ids=None, force=False)
+    else:
+        vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
+        tracks = bjf.build_dataset(vids, with_pose=use_pose, force=False)
     tracks = [t for t in tracks if (t["cross"] >= 0).any()]
     _, _, te_ids = split_tracks(tracks, args.seed)     # identical split to training
     logger.info(f"Held-out test tracks: {len(te_ids)}")
@@ -282,7 +315,7 @@ def main():
     t0 = time.time()
     _ = [predictor.predict_timeline(tracks[te_ids[0]]["feats"]) for _ in range(3)]
     dt = (time.time() - t0) / max(3 * len(tracks[te_ids[0]]["feats"]), 1)
-    size_kb = os.path.getsize(config.INTENT_MODEL_PATH) / 1024
+    size_kb = os.path.getsize(model_path) / 1024
     metrics["latency_ms_per_frame"] = float(dt * 1000)
     metrics["throughput_fps"] = float(1 / dt) if dt > 0 else None
     metrics["model_size_kb"] = float(size_kb)

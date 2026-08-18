@@ -43,6 +43,52 @@ def _get_model():
     return _model
 
 
+# ── RTMPose backend (top-down, ONNX via rtmlib) ──
+_rtm_pose = None
+_rtm_body = None
+
+
+def _rtm_device() -> str:
+    """Prefer CUDA for onnxruntime. onnxruntime-gpu needs CUDA/cuDNN DLLs on the
+    search path; torch's bundled libs satisfy that, so expose them first."""
+    try:
+        import torch
+        libdir = os.path.join(os.path.dirname(torch.__file__), "lib")
+        if os.path.isdir(libdir):
+            os.add_dll_directory(libdir)
+    except Exception:
+        pass
+    try:
+        import onnxruntime as ort
+        return "cuda" if "CUDAExecutionProvider" in ort.get_available_providers() else "cpu"
+    except Exception:
+        return "cpu"
+
+
+def _get_rtmpose():
+    """Standalone top-down RTMPose (needs a person bbox). Used for GT-box crops."""
+    global _rtm_pose
+    if _rtm_pose is None:
+        from rtmlib import RTMPose
+        dev = _rtm_device()
+        _rtm_pose = RTMPose(onnx_model=config.POSE_RTMPOSE_ONNX,
+                            model_input_size=tuple(config.POSE_RTMPOSE_INPUT_SIZE),
+                            backend="onnxruntime", device=dev)
+        logger.info(f"RTMPose loaded (device={dev})")
+    return _rtm_pose
+
+
+def _get_rtmbody():
+    """Whole-frame RTMDet+RTMPose pipeline for the live path (no GT boxes)."""
+    global _rtm_body
+    if _rtm_body is None:
+        from rtmlib import Body
+        dev = _rtm_device()
+        _rtm_body = Body(mode="balanced", backend="onnxruntime", device=dev)
+        logger.info(f"RTMPose Body (det+pose) loaded (device={dev})")
+    return _rtm_body
+
+
 def _iou(a: Sequence[float], b: Sequence[float]) -> float:
     """IoU of two [x, y, w, h] boxes."""
     ax, ay, aw, ah = a
@@ -58,12 +104,37 @@ def _iou(a: Sequence[float], b: Sequence[float]) -> float:
 
 class PoseEstimator:
     def __init__(self):
-        self._m = _get_model()
+        self.backend = getattr(config, "POSE_BACKEND", "yolo")
         self.conf = getattr(config, "POSE_CONF_THRESHOLD", 0.35)
         self.pad = getattr(config, "POSE_CROP_PAD", 0.15)
+        self.kpt_thr = getattr(config, "POSE_KPT_CONF_THR", 0.30)
+        if self.backend == "rtmpose":
+            self._rtm = _get_rtmpose()
+            self._m = None
+        else:
+            self._rtm = None
+            self._m = _get_model()
 
     # ── whole-frame pose (returns all persons) ──
     def estimate_frame(self, frame_bgr) -> List[Dict]:
+        if self.backend == "rtmpose":
+            body = _get_rtmbody()
+            kpts, scores = body(frame_bgr)          # (N,17,2), (N,17)
+            out: List[Dict] = []
+            for i in range(len(kpts)):
+                k = np.asarray(kpts[i], np.float32); s = np.asarray(scores[i], np.float32)
+                valid = s > self.kpt_thr
+                if int(valid.sum()) < 3:
+                    continue
+                xs, ys = k[valid, 0], k[valid, 1]   # tight box over confident joints
+                out.append({
+                    "bbox": [float(xs.min()), float(ys.min()),
+                             float(xs.max() - xs.min()), float(ys.max() - ys.min())],
+                    "keypoints": k,
+                    "kpt_conf": s,
+                })
+            return out
+
         r = self._m.predict(frame_bgr, conf=self.conf, verbose=False)[0]
         out: List[Dict] = []
         if r.keypoints is None or r.boxes is None or len(r.boxes) == 0:
@@ -85,6 +156,22 @@ class PoseEstimator:
     def estimate_crop(self, frame_bgr, bbox: Sequence[float]) -> Optional[Dict]:
         H, W = frame_bgr.shape[:2]
         x, y, w, h = bbox
+
+        if self.backend == "rtmpose":
+            # RTMPose is top-down: hand it the GT box (xyxy) directly. It does its
+            # own aspect-ratio expansion + crop internally and returns keypoints in
+            # full-frame coords, so no manual crop / best-IoU matching is needed.
+            x1 = max(0.0, float(x)); y1 = max(0.0, float(y))
+            x2 = min(float(W), float(x + w)); y2 = min(float(H), float(y + h))
+            if x2 - x1 < 4 or y2 - y1 < 4:
+                return None
+            kpts, scores = self._rtm(frame_bgr, bboxes=[[x1, y1, x2, y2]])
+            if kpts is None or len(kpts) == 0:
+                return None
+            return {"keypoints": np.asarray(kpts[0], np.float32),
+                    "kpt_conf": np.asarray(scores[0], np.float32),
+                    "match_iou": 1.0}
+
         px, py = w * self.pad, h * self.pad
         x1 = max(0, int(x - px)); y1 = max(0, int(y - py))
         x2 = min(W, int(x + w + px)); y2 = min(H, int(y + h + py))

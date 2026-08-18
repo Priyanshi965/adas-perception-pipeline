@@ -165,7 +165,18 @@ DUPLICATE_HASH_THRESHOLD = 6
 # Enable the pose stage (17-keypoint COCO skeletons for body-language features)
 POSE_ENABLED = True
 
-# Pose model weights (YOLO-pose). Auto-downloads if missing.
+# Pose backend: "rtmpose" (top-down RTMPose via rtmlib, more accurate, GPU ONNX)
+# or "yolo" (ultralytics YOLO-pose). Both emit 17 COCO keypoints, so downstream
+# body_language features are identical — this only changes keypoint quality.
+POSE_BACKEND = "rtmpose"
+
+# RTMPose ONNX model (auto-downloaded + cached by rtmlib). rtmpose-m body7 @256x192
+# is a strong accuracy/speed balance; input size must match the chosen model.
+POSE_RTMPOSE_ONNX = ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
+                     "onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip")
+POSE_RTMPOSE_INPUT_SIZE = (192, 256)   # (w, h) as rtmlib expects
+
+# Pose model weights (YOLO-pose fallback backend). Auto-downloads if missing.
 POSE_MODEL_PATH = os.path.join(BASE_DIR, "..", "Pedistrian_intent_detection", "yolo11n-pose.pt")
 POSE_MODEL_FALLBACK = "yolo11n-pose.pt"
 

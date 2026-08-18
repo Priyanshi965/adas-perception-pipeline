@@ -69,7 +69,7 @@ class _LSTMModel:
 # ─── Predictor ────────────────────────────────────────────────────────────────
 
 class IntentPredictor:
-    def __init__(self):
+    def __init__(self, model_path: Optional[str] = None):
         self.model: Optional[_LSTMModel] = None
         self.mean = None
         self.std = None
@@ -77,10 +77,13 @@ class IntentPredictor:
         self.obs_len = config.INTENT_OBS_LEN
         self.threshold = getattr(config, "INTENT_THRESHOLD", 0.5)
         self._warned = False
+        # Optional override so callers can load a dataset-specific model (e.g. the
+        # PIE model) without mutating config.INTENT_MODEL_PATH.
+        self.model_path = model_path
         self._load()
 
     def _load(self):
-        path = getattr(config, "INTENT_MODEL_PATH", None)
+        path = self.model_path or getattr(config, "INTENT_MODEL_PATH", None)
         if not (path and os.path.exists(path)):
             logger.warning("No trained intent model — returning neutral 0.5 predictions. "
                            "Train one: python train_intent.py --pose")
