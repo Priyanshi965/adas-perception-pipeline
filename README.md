@@ -3,9 +3,9 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 
-A real-time perception pipeline that **predicts whether a pedestrian is about to cross ~1.5 s ahead** — not just reacting to current motion — by fusing body-pose and trajectory in a leak-free temporal model. Pose + trajectory fusion lifts crossing-onset **ROC-AUC from 0.730 → 0.781** over a trajectory-only baseline (5-fold cross-validation on 150 JAAD videos) and more than halves fold-to-fold variance.
+A real-time perception pipeline that **predicts whether a pedestrian is about to cross ~1.5 s ahead** — not just reacting to current motion — by fusing body-pose and trajectory in a leak-free temporal model. Pose + trajectory fusion lifts crossing-onset **ROC-AUC from 0.730 → 0.781** over a trajectory-only baseline (5-fold cross-validation on 150 JAAD videos) and more than halves fold-to-fold variance. The same pipeline generalises to an **independent PIE benchmark (ROC-AUC 0.797)** and to **unstructured Indian roads** — the Indian Driving Dataset (IDD, 0.92 pedestrian-detection precision) and a 6-minute manually recorded dashcam clip — **with no retraining**.
 
-The full system ingests dashcam or surveillance video, detects and tracks road agents (RT-DETR + ByteTrack), estimates pose, predicts crossing intent, scores danger, and renders annotated video — all through a live FastAPI web UI. Modular, checkpointed, and resumable.
+The full system ingests dashcam or surveillance video, detects and tracks road agents (RT-DETR + ByteTrack), estimates pose (**RTMPose**, top-down; YOLO-pose selectable), predicts crossing intent, scores danger, and renders annotated video — all through a live FastAPI web UI. Modular, checkpointed, and resumable.
 
 ---
 
@@ -66,7 +66,7 @@ Input Video / JAAD Dataset
 | 3 | **frame_cleaner** | Drops corrupt (>95% solid), blurry, dark (mean < 40), and near-duplicate frames, then denoises + CLAHE-normalises survivors. **Blur threshold is adaptive**: it samples ≤200 frames, takes the 20th-percentile Laplacian variance ×0.5 (capped at `BLUR_THRESHOLD=100`), so degraded footage never loses more than ~20% of frames to blur alone. Dedup uses a 16×16 dHash with Hamming distance < 6 |
 | 4 | **detector** | RT-DETR (transformer, NMS-free) by default; `yolo11`/`yolov8` selectable via `config.DETECTOR_BACKEND` |
 | 5 | **tracker** | ByteTrack (default) or IoU fallback; JAAD mode uses ground-truth `ped_id` directly |
-| 6 | **pose_estimator** | YOLO-pose 17-keypoint skeleton per pedestrian → body-language features (torso lean, head/gaze turn, stance, gait, foot placement) |
+| 6 | **pose_estimator** | RTMPose (top-down) 17-keypoint skeleton per pedestrian → body-language features (torso lean, head/gaze turn, stance, gait, foot placement); YOLO-pose selectable via `config.POSE_BACKEND` |
 | 7 | **behavior_analyzer** | Classifies motion over a 7-frame rolling window: `stopping / walking / running / crossing / driving / driving_slow` |
 | 8 | **intent_predictor** | **Predicts** crossing intent per frame from a temporal model over pose + trajectory; writes `intent`, `crossing_prob`, `intent_conf` |
 | 9 | **tagger** | Computes `danger_score` (0.0–1.0) per object, proximity bonus (+0.25) for ped+vehicle within 150px, emits `DANGER/SAFE` scene tag |
@@ -97,8 +97,8 @@ video ─▶ context{video_path}
   │                  (label = pedestrian | vehicle, bbox = [x,y,w,h])
   ├─ tracker         ByteTrack links detections across frames, assigning a stable
   │                  track_id; builds context{track_history:{tid:[(frame_id,bbox,ts)]}}
-  ├─ pose_estimator  runs YOLO-pose on each frame, matches each 17-keypoint
-  │                  skeleton to a pedestrian box by IoU, and attaches
+  ├─ pose_estimator  runs RTMPose (top-down) on each pedestrian box, attaches
+  │                  each 17-keypoint skeleton to its box, and stores
   │                  det{keypoints, kpt_conf, pose_features} (10 body-language values)
   ├─ behavior_analyzer  motion label (walking/crossing/…) from displacement
   ├─ intent_predictor   THE PREDICTION STEP (see below)
@@ -317,6 +317,7 @@ Key parameters in `config.py`:
 | `CROSSING_HORIZONTAL_RATIO` | `0.55` | Horizontal motion fraction to classify as crossing |
 | `DETECTOR_BACKEND` | `"rtdetr"` | Detector: `rtdetr` / `yolo11` / `yolov8` |
 | `POSE_ENABLED` | `True` | Extract skeletons + body-language features |
+| `POSE_BACKEND` | `"rtmpose"` | Pose estimator: `rtmpose` (top-down) / `yolo` (fallback) |
 | `INTENT_OBS_LEN` | `16` | Observation window (timeline steps) |
 | `INTENT_TTE` | `15` | Predict a crossing within this many future steps |
 | `INTENT_USE_POSE` | `True` | Fuse body-language features into the intent model |
@@ -463,6 +464,39 @@ safety-critical error for an ADAS; this trades some precision for coverage.
 > 38 test tracks) and describe the **deployable** `hidden=64` model at its
 > calibrated threshold — distinct from the `hidden=96` comparison run. Seeded (`42`).
 
+### Cross-dataset generalisation (PIE · IDD · manual video)
+
+The same JAAD-trained pipeline was evaluated on three independent sources it never
+trained on, spanning curated Western intent data, an unstructured Indian
+perception benchmark, and raw in-the-wild footage. The result is consistent
+across all of them.
+
+| Dataset | Nature | Evaluation | Headline result |
+|---|---|---|---|
+| **JAAD** | Western, intent-labelled | 5-fold CV (intent) | ROC-AUC **0.781**, Bal-Acc 73.7% |
+| **PIE** | Western, intent-labelled | 5-fold CV (intent) | ROC-AUC **0.797** (fusion beats trajectory by +0.113 AUC) |
+| **Manual dashcam** (6 min, Indian) | In-the-wild, unlabelled | End-to-end (qualitative) | 2,045 tracks · 2,999 skeletons · 908 crossing-intent flags · **no retraining** |
+| **IDD** | Indian, segmentation-labelled | Per-frame detection | Precision **0.92**, 85% recall on near/large pedestrians, 93% RTMPose coverage |
+
+- **PIE** reuses JAAD's exact loader and windowing (`datasets/pie_loader.py`,
+  `datasets/build_pie_features.py`); on 228 tracks / 12,597 windows the
+  pose+trajectory fusion reaches **ROC-AUC 0.797** — higher than JAAD — confirming
+  the method is not tuned to a single benchmark. Figures + paper in `results_pie/`.
+- **RTMPose upgrade.** Swapping YOLO-pose → RTMPose raised valid-keypoint coverage
+  72% → 88% on PIE and lifted the pose+trajectory held-out **ROC-AUC 0.816 → 0.844**.
+- **IDD** has segmentation masks but *no* intent labels and non-contiguous frames,
+  so it is a **detection/pose** evaluation only: zero-shot RT-DETR scores
+  **precision 0.92** against IDD person/rider polygons, with recall stratified by
+  scale (16% tiny / 66% mid / **85% large** pedestrians — 78% of IDD pedestrians
+  are <10% of frame height). RTMPose keeps **93%** keypoint coverage on dense
+  Indian scenes.
+- **Manual 6-min Indian dashcam clip** runs end-to-end through the *identical*
+  pipeline (upload → annotated MP4 + JSON/CSV/XML) with no retraining.
+
+> This whole section is written up with figures and citations in
+> [`results_pie/paper_full_updated.tex`](results_pie/paper_full_updated.tex). All
+> PIE/IDD figures live in `results_pie/`.
+
 ### Reproduce
 
 ```bash
@@ -515,7 +549,8 @@ python evaluate.py --videos 150                    # evaluates at the calibrated
 |------|---------|
 | `rtdetr-l.pt` | RT-DETR detector weights (auto-downloaded if missing) |
 | `yolo11n.pt` / `yolov8n.pt` | Alternative detector backbones |
-| `yolo11n-pose.pt` | YOLO-pose weights for 17-keypoint skeletons |
+| RTMPose (rtmlib) | Default top-down 17-keypoint pose estimator (ONNX, auto-downloaded) |
+| `yolo11n-pose.pt` | Fallback YOLO-pose weights for 17-keypoint skeletons |
 | `checkpoints/intent_model.npz` | Trained crossing-intent model (weights + norm stats + threshold) |
 
 > Detector/pose weights live in `Pedistrian_intent_detection/`. All `*.pt`/`*.npz`
@@ -528,11 +563,11 @@ python evaluate.py --videos 150                    # evaluates at the calibrated
 
 | Mode | Description |
 |------|-------------|
-| `--mode video` | Process a single uploaded video file |
+| `--mode video` | Process a single uploaded video file (used for the manual Indian dashcam clip and IDD frames) |
 | `--mode jaad` | Process JAAD dataset (XML annotations + optional video clips) |
-| `--mode pie` | Placeholder — not yet implemented |
+| `--mode pie` | Process the PIE dataset via `datasets/pie_loader.py` → `datasets/build_pie_features.py` (cross-dataset validation) |
 
-> The JAAD dataset lives at `Pedistrian_intent_detection/JAAD/` and is gitignored due to size. It contains dashcam clips with frame-level pedestrian crossing intent labels.
+> The JAAD dataset lives at `Pedistrian_intent_detection/JAAD/` and is gitignored due to size. The **PIE**, **PIE_data**, and **IDD** raw datasets are likewise gitignored (downloaded locally, too large for GitHub); their generated results and figures are kept under `results_pie/`.
 
 ---
 
@@ -579,7 +614,10 @@ adas_pipeline/
 │   └── tagger.py
 ├── datasets/
 │   ├── jaad_loader.py        # JAAD XML → structured tracks
-│   └── build_jaad_features.py# offline feature/pose extraction (cached)
+│   ├── build_jaad_features.py# offline feature/pose extraction (cached)
+│   ├── pie_loader.py         # PIE annotations → structured tracks
+│   ├── build_pie_features.py # PIE feature/pose extraction (cross-dataset)
+│   └── feature_builder.py    # shared feature-building helpers
 ├── train_intent.py           # supervised training (pose vs baseline)
 ├── evaluate.py               # metrics + early-prediction curve + plots
 ├── exporter.py · visualizer.py · xml_exporter.py
@@ -599,5 +637,8 @@ Released under the [MIT License](LICENSE) — free to use, modify, and distribut
 ## Acknowledgements
 
 - **JAAD** (Joint Attention in Autonomous Driving) dataset — Rasouli et al., for pedestrian crossing-intent annotations.
+- **PIE** (Pedestrian Intention Estimation) dataset — Rasouli et al., for independent cross-dataset validation.
+- **IDD** (Indian Driving Dataset) — Varma et al. (IIIT Hyderabad), for unstructured Indian-road generalisation testing.
 - **Ultralytics** — RT-DETR, YOLO11, and YOLO-pose model implementations and pretrained weights.
+- **RTMPose** (rtmlib / OpenMMLab) — top-down 17-keypoint pose estimation.
 

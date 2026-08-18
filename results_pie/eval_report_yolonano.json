@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "generated": "2026-08-10T14:40:30",
+    "command": "python adas_pipeline/evaluate.py --dataset pie --seed 42",
+    "dataset": "pie",
+    "videos": 40,
+    "seed": 42,
+    "threshold": 0.2460000067949295,
+    "threshold_source": "model",
+    "features": "POSE+KIN",
+    "obs_len": 16,
+    "tte": 15
+  },
+  "metrics": {
+    "samples": 1564,
+    "positives": 109,
+    "accuracy": 0.5863171355498721,
+    "precision": 0.1325136612021858,
+    "recall": 0.8899082568807339,
+    "f1": 0.23067776456599287,
+    "roc_auc": 0.8157697279233267,
+    "avg_precision": 0.26775346378332504,
+    "confusion": {
+      "tn": 820,
+      "fp": 635,
+      "fn": 12,
+      "tp": 97
+    },
+    "early_prediction": [
+      {
+        "steps_ahead": 3,
+        "accuracy": 0.84,
+        "n": 25
+      },
+      {
+        "steps_ahead": 6,
+        "accuracy": 0.9166666666666666,
+        "n": 24
+      },
+      {
+        "steps_ahead": 9,
+        "accuracy": 0.8695652173913043,
+        "n": 23
+      },
+      {
+        "steps_ahead": 12,
+        "accuracy": 0.9473684210526315,
+        "n": 19
+      },
+      {
+        "steps_ahead": 15,
+        "accuracy": 0.8888888888888888,
+        "n": 18
+      }
+    ],
+    "latency_ms_per_frame": 4.111909541953989,
+    "throughput_fps": 243.1960114387141,
+    "model_size_kb": 216.224609375
+  }
+}

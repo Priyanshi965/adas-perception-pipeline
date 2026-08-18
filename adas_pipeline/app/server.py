@@ -88,7 +88,7 @@ def _run_pipeline(job_id: str, video_path: str):
 
         runner = PipelineRunner(stages, resume=False)
         context = {"mode": "video", "video_path": video_path}
-        runner.run(context)
+        context = runner.run(context) or context
 
         # Render annotated video — capture actual output path (may be .avi if ffmpeg unavailable)
         log_q.put("INFO: Rendering annotated video...")
@@ -125,6 +125,20 @@ def _run_pipeline(job_id: str, video_path: str):
             if os.path.exists(src):
                 shutil.copy2(src, dst)
 
+        # Per-stage preview images (interactive step explorer). Rendered from the
+        # rich in-memory records (keypoints + intent intact) while THIS job's
+        # clean frames are still on disk. Never allowed to fail the job.
+        steps_manifest = {"stages": []}
+        try:
+            log_q.put("INFO: Rendering pipeline step previews...")
+            from app.stage_preview import render_stage_previews
+            steps_manifest = render_stage_previews(
+                context.get("frame_records") or [], job_out_dir
+            )
+            log_q.put(f"INFO: Step previews: {len(steps_manifest.get('stages', []))} stages")
+        except Exception as e:
+            log_q.put(f"WARN: step preview generation skipped: {e}")
+
         jobs[job_id]["status"] = "done"
         jobs[job_id]["result"] = {
             "video": job_video,
@@ -132,6 +146,8 @@ def _run_pipeline(job_id: str, video_path: str):
             "csv":   job_csv,
             "xml":   job_xml,
         }
+        jobs[job_id]["steps"] = steps_manifest
+        jobs[job_id]["job_dir"] = job_out_dir
         log_q.put("DONE")
 
     except Exception as e:
@@ -213,6 +229,41 @@ async def status(job_id: str):
         "status": job["status"],
         "has_result": job["result"] is not None,
     }
+
+
+@app.get("/steps/{job_id}")
+async def steps(job_id: str):
+    """Return the per-stage preview manifest for a completed job."""
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    return jobs[job_id].get("steps") or {"stages": []}
+
+
+@app.get("/preview/{job_id}/{fname}")
+async def preview(job_id: str, fname: str):
+    """Serve a per-stage preview image from the job directory.
+
+    Hardened against path traversal: only a bare filename inside this job's
+    directory is served.
+    """
+    if job_id not in jobs:
+        raise HTTPException(404, "Job not found")
+    # Reject anything that is not a plain filename (no separators, no '..').
+    if fname != os.path.basename(fname) or fname in ("", ".", ".."):
+        raise HTTPException(400, "Invalid filename")
+
+    job_dir = jobs[job_id].get("job_dir")
+    if not job_dir:
+        raise HTTPException(404, "No previews for job")
+
+    file_path = os.path.realpath(os.path.join(job_dir, fname))
+    # Confirm the resolved path is still inside the job directory.
+    if os.path.commonpath([file_path, os.path.realpath(job_dir)]) != os.path.realpath(job_dir):
+        raise HTTPException(400, "Invalid path")
+    if not file_path.endswith(".jpg") or not os.path.exists(file_path):
+        raise HTTPException(404, "Preview not found")
+
+    return FileResponse(file_path, media_type="image/jpeg")
 
 
 @app.get("/stream/{job_id}/video")

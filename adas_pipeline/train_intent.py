@@ -32,6 +32,7 @@ sys.path.insert(0, ROOT)
 import config
 from datasets import jaad_loader as jl
 from datasets import build_jaad_features as bjf
+from datasets import build_pie_features as bpf
 from modules import intent_features as ifeat
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s",
@@ -157,8 +158,19 @@ def train(args):
     torch, nn = _import_torch()
     torch.manual_seed(args.seed); np.random.seed(args.seed); random.seed(args.seed)
 
-    vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
-    tracks = bjf.build_dataset(vids, with_pose=args.use_pose, force=False)
+    # Output path is dataset-specific so a PIE run never clobbers the JAAD model.
+    model_path = config.INTENT_MODEL_PATH
+    if args.dataset == "pie":
+        base, ext = os.path.splitext(config.INTENT_MODEL_PATH)
+        model_path = base + "_pie" + ext
+
+    if args.dataset == "pie":
+        # PIE reuses the shared feature builder; all present sets, all tracks.
+        # The track-level split below IS the random split (leak-free by track).
+        tracks = bpf.build_dataset(with_pose=args.use_pose, set_ids=None, force=False)
+    else:
+        vids = jl.available_video_ids(config.JAAD_ANNOTATIONS_DIR)[: args.videos]
+        tracks = bjf.build_dataset(vids, with_pose=args.use_pose, force=False)
     tracks = [t for t in tracks if (t["cross"] >= 0).any()]
     if len(tracks) < 8:
         logger.error(f"Only {len(tracks)} usable tracks — increase --videos."); sys.exit(1)
@@ -216,7 +228,7 @@ def train(args):
     # Model selection by validation ROC-AUC (threshold-free → robust to the class
     # imbalance and the tiny val sets that JAAD track-level splits produce).
     best_auc, best_ep, patience, best_state = -1.0, 0, 0, deepcopy(net.state_dict())
-    os.makedirs(os.path.dirname(config.INTENT_MODEL_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
     for ep in range(1, args.epochs + 1):
         net.train()
         for xb, yb in loader:
@@ -261,8 +273,8 @@ def train(args):
     logger.info(f"Calibrated threshold: {thr:.3f}")
     logger.info(f"Val prob spread: min={vprob.min():.3f} med={np.median(vprob):.3f} "
                 f"max={vprob.max():.3f}  |  frac>=thr={(vprob >= thr).mean():.3f}")
-    export_npz(net, config.INTENT_MODEL_PATH, mean, std, cols, args, threshold=float(thr))
-    torch.save(net.state_dict(), config.INTENT_MODEL_PATH + ".pt")
+    export_npz(net, model_path, mean, std, cols, args, threshold=float(thr))
+    torch.save(net.state_dict(), model_path + ".pt")
 
     # ── Test evaluation (best weights, calibrated threshold) ──
     with torch.no_grad():
@@ -279,11 +291,13 @@ def train(args):
         logger.info("\n" + classification_report(y_te, preds, target_names=["not_cross", "cross"]))
     else:
         logger.warning("Test set too small / single-class — increase --videos for a real number.")
-    logger.info(f"Model → {config.INTENT_MODEL_PATH}")
+    logger.info(f"Model → {model_path}")
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train pedestrian intent model")
+    p.add_argument("--dataset", choices=["jaad", "pie"], default="jaad",
+                   help="jaad (flat clips, --videos) or pie (3-set subset, all tracks)")
     p.add_argument("--videos", type=int, default=config.__dict__.get("TRAIN_VIDEOS", 40))
     p.add_argument("--pose", dest="use_pose", action="store_true", default=config.INTENT_USE_POSE)
     p.add_argument("--no-pose", dest="use_pose", action="store_false")

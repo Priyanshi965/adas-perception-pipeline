@@ -15,6 +15,12 @@ data/
 Pedistrian_intent_detection/JAAD/
 Pedistrian_intent_detection/models/
 
+# Raw benchmark datasets (downloaded locally, too big for GitHub)
+PIE/
+PIE_data/
+idd/
+sample_vid.mp4
+
 # Pipeline internals
 adas_pipeline/checkpoints/
 adas_pipeline/output/
