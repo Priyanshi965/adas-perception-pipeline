@@ -367,6 +367,32 @@ body.pl-running .wb{animation:wavePulse var(--d,.4s) ease-in-out infinite altern
 @keyframes dlFill{to{width:100%}}
 .dl-name{font-family:'Exo 2',sans-serif;font-size:.76rem;font-weight:700;text-align:center}
 .dl-ext{font-family:'Orbitron',sans-serif;font-size:.56rem;letter-spacing:2px;color:var(--muted)}
+/* ── Pipeline Step Explorer ─────────────────────────────────────────── */
+.step-exp{margin-bottom:20px;border:1px solid var(--border);border-radius:16px;background:rgba(5,10,20,.6);overflow:hidden}
+.step-tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--border);background:rgba(0,212,255,.03)}
+.step-tab{flex:1;min-width:96px;padding:11px 8px 9px;background:none;border:none;border-bottom:2px solid transparent;cursor:pointer;transition:background .18s,border-color .18s;position:relative}
+.step-tab:not(:last-child){border-right:1px solid rgba(0,212,255,.08)}
+.step-tab .st-idx{font-family:'Orbitron',sans-serif;font-size:.62rem;font-weight:900;color:var(--muted);display:block;line-height:1}
+.step-tab .st-nm{font-family:'Exo 2',sans-serif;font-size:.6rem;letter-spacing:.5px;color:var(--muted);margin-top:4px;display:block;transition:color .18s}
+.step-tab:hover{background:rgba(0,212,255,.06)}
+.step-tab.active{background:rgba(0,212,255,.1);border-bottom-color:var(--cyan)}
+.step-tab.active .st-idx{color:var(--cyan)}
+.step-tab.active .st-nm{color:var(--text)}
+.step-stage{position:relative;background:#000;min-height:150px}
+.step-img{width:100%;display:block;transition:opacity .25s ease}
+.step-img.swap{opacity:0}
+.step-badge{position:absolute;top:8px;right:8px;background:rgba(5,10,20,.82);border:1px solid var(--border);border-radius:8px;padding:4px 10px;font-family:'Share Tech Mono',monospace;font-size:.62rem;color:var(--cyan)}
+.step-foot{padding:12px 16px;display:flex;align-items:center;gap:14px}
+.step-foot .sf-num{font-family:'Orbitron',sans-serif;font-size:1.1rem;font-weight:900;color:var(--cyan);flex-shrink:0}
+.step-foot .sf-txt{flex:1}
+.step-foot .sf-title{font-family:'Orbitron',sans-serif;font-size:.66rem;letter-spacing:2px;color:var(--text);margin-bottom:3px}
+.step-foot .sf-desc{font-family:'Exo 2',sans-serif;font-size:.72rem;color:var(--muted);line-height:1.5}
+.step-nav{display:flex;gap:6px;flex-shrink:0}
+.step-nav button{font-family:'Orbitron',sans-serif;font-size:.7rem;background:none;border:1px solid var(--border);border-radius:8px;color:var(--cyan);width:30px;height:30px;cursor:pointer;transition:background .15s}
+.step-nav button:hover{background:rgba(0,212,255,.12)}
+.step-scrub{height:4px;background:rgba(0,212,255,.1);display:flex;gap:2px;padding:0 2px}
+.step-scrub .ss{flex:1;background:rgba(0,212,255,.2);border-radius:2px;transition:background .2s}
+.step-scrub .ss.on{background:var(--cyan)}
 </style>
 </head>
 <body>
@@ -990,6 +1016,7 @@ async function appendResultCard(jobId,filename){
     </div>
     <div class="res-body">
       ${buildStatsHtml(tf,to,df,sf,jobId)}
+      <div id="steps-${jobId}"></div>
       ${buildTimelineHtml(frameData,jobId)}
       <div class="vid-wrap" style="position:relative">
         <video id="vid-${jobId}" controls preload="auto" playsinline
@@ -1010,6 +1037,9 @@ async function appendResultCard(jobId,filename){
 
   // Auto-open latest
   card.classList.add('open');
+
+  // Build the interactive pipeline step explorer (async — never blocks the card)
+  loadStepExplorer(jobId);
 
   // Wire up video
   const vid=document.getElementById(`vid-${jobId}`);
@@ -1071,6 +1101,75 @@ function buildTimelineHtml(frameData,jobId){
     <div class="tl-label">FRAME TIMELINE — CLICK TO SEEK</div>
     <div class="tl-bar" id="tl-${jobId}">${bars}</div>
   </div>`;
+}
+
+// ── Pipeline Step Explorer ───────────────────────────────────────────────
+async function loadStepExplorer(jobId){
+  const host=document.getElementById(`steps-${jobId}`);
+  if(!host)return;
+  let man;
+  try{const r=await fetch(`/steps/${jobId}`);man=await r.json();}catch(e){return;}
+  const stages=(man&&man.stages)||[];
+  if(!stages.length)return;  // pose/preview unavailable — silently skip
+
+  const frameInfo=`FRAME ${man.frame_id} · ${man.n_ped} PED · ${man.n_veh} VEH · ${man.scene_tag}`;
+  const tabs=stages.map((s,i)=>`
+    <button class="step-tab${i===0?' active':''}" data-i="${i}" onclick="stepGo('${jobId}',${i})">
+      <span class="st-idx">${i+1}</span><span class="st-nm">${s.label}</span>
+    </button>`).join('');
+  const scrub=stages.map((_,i)=>`<div class="ss${i===0?' on':''}" data-i="${i}"></div>`).join('');
+
+  host.innerHTML=`
+    <div class="sec-lbl" style="margin-bottom:14px">PIPELINE STEP EXPLORER<span class="bcur"></span></div>
+    <div class="step-exp" id="se-${jobId}">
+      <div class="step-tabs">${tabs}</div>
+      <div class="step-stage">
+        <img class="step-img" id="seimg-${jobId}" src="/preview/${jobId}/${stages[0].file}" alt="pipeline stage"/>
+        <div class="step-badge" id="sebadge-${jobId}">${stages[0].stat||''}</div>
+      </div>
+      <div class="step-scrub" id="sescrub-${jobId}">${scrub}</div>
+      <div class="step-foot">
+        <div class="sf-num" id="senum-${jobId}">1/${stages.length}</div>
+        <div class="sf-txt">
+          <div class="sf-title" id="setitle-${jobId}">${stages[0].label}</div>
+          <div class="sf-desc" id="sedesc-${jobId}">${stages[0].desc}</div>
+        </div>
+        <div class="step-nav">
+          <button onclick="stepStep('${jobId}',-1)" title="Previous stage">‹</button>
+          <button onclick="stepStep('${jobId}',1)" title="Next stage">›</button>
+        </div>
+      </div>
+    </div>
+    <div class="tl-label" style="margin:8px 2px 18px">${frameInfo} — click a step to see what that stage produces on this frame</div>`;
+
+  // stash state on the container element
+  document.getElementById(`se-${jobId}`)._stages=stages;
+  document.getElementById(`se-${jobId}`)._cur=0;
+}
+
+function stepGo(jobId,i){
+  const box=document.getElementById(`se-${jobId}`);if(!box)return;
+  const stages=box._stages;if(!stages||i<0||i>=stages.length)return;
+  box._cur=i;
+  const s=stages[i];
+  const img=document.getElementById(`seimg-${jobId}`);
+  img.classList.add('swap');
+  setTimeout(()=>{
+    img.src=`/preview/${jobId}/${s.file}`;
+    img.onload=()=>img.classList.remove('swap');
+    img.onerror=()=>img.classList.remove('swap');
+  },130);
+  document.getElementById(`sebadge-${jobId}`).textContent=s.stat||'';
+  document.getElementById(`setitle-${jobId}`).textContent=s.label;
+  document.getElementById(`sedesc-${jobId}`).textContent=s.desc;
+  document.getElementById(`senum-${jobId}`).textContent=`${i+1}/${stages.length}`;
+  box.querySelectorAll('.step-tab').forEach(t=>t.classList.toggle('active',+t.dataset.i===i));
+  box.querySelectorAll('.step-scrub .ss').forEach(d=>d.classList.toggle('on',+d.dataset.i<=i));
+}
+function stepStep(jobId,delta){
+  const box=document.getElementById(`se-${jobId}`);if(!box)return;
+  const n=(box._stages||[]).length;if(!n)return;
+  stepGo(jobId,(box._cur+delta+n)%n);
 }
 
 function buildDownloadsHtml(jobId){

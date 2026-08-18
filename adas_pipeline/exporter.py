@@ -46,6 +46,13 @@ def _build_json_record(record: Dict) -> Dict:
             "object_tag": det.get("object_tag"),
             "danger_score": det.get("danger_score"),
         }
+        # Crossing-intent prediction (pedestrians) — scalars, so the annotated
+        # video and downstream consumers can show the intent badge. Keypoints are
+        # deliberately NOT serialized here (17x3 floats/ped/frame is too large).
+        if det.get("intent") is not None:
+            obj["intent"] = det.get("intent")
+            obj["crossing_prob"] = det.get("crossing_prob")
+            obj["intent_conf"] = det.get("intent_conf")
         # Include JAAD ground-truth fields if present
         if "jaad_action" in det:
             obj["jaad_action"] = det["jaad_action"]
