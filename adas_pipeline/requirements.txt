@@ -7,3 +7,5 @@ fastapi>=0.110.0
 uvicorn>=0.27.0
 python-multipart>=0.0.9
 av>=11.0.0
+rtmlib>=0.0.16
+onnxruntime>=1.17.0
