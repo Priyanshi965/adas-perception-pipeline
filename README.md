@@ -278,6 +278,54 @@ python adas_pipeline/app/server.py
 
 ---
 
+## 📥 Dataset Setup (nuScenes multisensor fusion)
+
+The datasets are **not** committed to this repo — nuScenes' license forbids
+redistribution and the blobs are tens of GB. Download them locally with the
+helper script. **Fastest method:** the public AWS S3 open-data bucket
+(`s3://motional-nuscenes`) via the AWS CLI — multi-threaded and auto-resuming, and
+**no nuScenes account is needed for the S3 download**. (JAAD/PIE/IDD are separate;
+see their own sections.)
+
+```bash
+pip install awscli                       # one-time
+cd adas_pipeline
+```
+
+| Goal | Command | Size | Notes |
+|------|---------|------|-------|
+| **Real numbers, full trainval** (recommended) | `python -m datasets.download_nuscenes meta` | 0.46 GB | trains all 850 scenes with **KIN+LiDAR** — no blobs (`num_lidar_pts` is in the annotations) |
+| **Dashboard road geometry** | `python -m datasets.download_nuscenes map` | 0.40 GB | HD-map lanes / crosswalks / intersections |
+| **10-scene sample** (quick demo) | `python -m datasets.download_nuscenes mini` | 4.2 GB | all sensors, 10 scenes |
+| **Add camera + radar** (one partition) | `python -m datasets.download_nuscenes keyframes 1` | 4.5 GB | keyframes only (samples, not sweeps) — 1/7th of full blobs |
+| Browse the bucket | `python -m datasets.download_nuscenes list` | — | list all files |
+
+The script downloads to `downloads/` and extracts into `nuscenes-trainval/` (or
+`nuscenes/` for mini). Then point the pipeline at it and train:
+
+```bash
+# PowerShell (Windows)
+$env:NUSC_VERSION="v1.0-trainval"; $env:NUSC_DATAROOT="E:\datacleaning\nuscenes-trainval"
+python -m datasets.check_nuscenes --meta-only        # verify + preview labels
+python train_intent.py --dataset nuscenes --meta-only --lidar   # full-trainval, real numbers
+```
+
+> **Why meta-only works:** the crossing label, BEV trajectory, and LiDAR
+> point-density channels all come from the annotation pack — only the *camera
+> (pose)* and *radar* channels need the multi-GB sensor blobs. So a **0.46 GB**
+> download trains a real trajectory+LiDAR model on the full 850-scene trainval
+> (held-out test **ROC-AUC ≈ 0.99**). See [`docs/nuscenes_fusion.md`](docs/nuscenes_fusion.md)
+> for the full method, results, ablations, latency, and the dashboard.
+
+**Perception dashboard:** after `meta` + `map`, run the export + server, then open
+`http://localhost:8000/nuscenes`:
+```bash
+python -m datasets.export_scene_viz --split test --num 8   # precompute BEV scenes
+python -m app.server
+```
+
+---
+
 ## 🚀 Quick Start
 
 ### Web UI

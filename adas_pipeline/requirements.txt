@@ -16,3 +16,5 @@ nuscenes-devkit>=1.1.0
 pyquaternion>=0.9.9
 shapely>=2.0
 cachetools>=5.0
+# dataset download from the public nuScenes S3 bucket (datasets/download_nuscenes.py):
+awscli>=1.32
