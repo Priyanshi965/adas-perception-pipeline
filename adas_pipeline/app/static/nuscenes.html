@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Multisensor Fusion — Perception HMI</title>
+<style>
+:root{
+  --bg:#080b10; --bg2:#0b0f16; --panel:#0d1219; --panel2:#0f1520; --line:rgba(255,255,255,.08);
+  --line2:rgba(255,255,255,.14); --text:#e6ecf3; --muted:#8a97a8; --faint:#586374;
+  --cyan:#37d0e0; --green:#3ddc84; --amber:#ffb020; --red:#ff4d5e; --blue:#5b8cff;
+  --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+.app{display:grid;grid-template-columns:288px 1fr 300px;grid-template-rows:44px 1fr 34px;height:100vh;gap:9px;padding:9px}
+.topbar{grid-column:1/4;display:flex;align-items:center;gap:16px;padding:0 14px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+.brand{font-weight:650;letter-spacing:.2px;font-size:.92rem;display:flex;align-items:center;gap:9px}
+.brand b{color:var(--cyan)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+.tsep{width:1px;height:20px;background:var(--line)}
+.tchip{font-family:var(--mono);font-size:.66rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.tchip b{color:var(--text)}
+.topbar .right{margin-left:auto;display:flex;align-items:center;gap:14px}
+a.back{color:var(--faint);text-decoration:none;font-family:var(--mono);font-size:.66rem}
+.colL,.colR{display:flex;flex-direction:column;gap:9px;min-height:0}
+.center{position:relative;min-height:0;background:radial-gradient(120% 100% at 50% 100%,#0e1622 0%,#0a0f18 55%,#05080e 100%);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.center canvas{width:100%;height:100%;display:block}
+.layers{position:absolute;top:10px;left:10px;display:flex;gap:5px;background:rgba(10,14,20,.7);backdrop-filter:blur(4px);border:1px solid var(--line);border-radius:8px;padding:5px}
+.layers button{font-family:var(--mono);font-size:.58rem;letter-spacing:.06em;color:var(--faint);background:transparent;border:1px solid transparent;border-radius:5px;padding:4px 7px;cursor:pointer;transition:.12s}
+.layers button.on{color:var(--cyan);border-color:rgba(55,208,224,.35);background:rgba(55,208,224,.08)}
+.layers button.on.primary{color:var(--green);border-color:rgba(61,220,132,.4);background:rgba(61,220,132,.1)}
+.roadtype{position:absolute;top:10px;right:10px;font-family:var(--mono);font-size:.6rem;letter-spacing:.09em;color:var(--muted);background:rgba(10,14,20,.7);border:1px solid var(--line);border-radius:7px;padding:5px 10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:11px 12px}
+.card.grow{flex:1;min-height:0;display:flex;flex-direction:column}
+.lbl{font-family:var(--mono);font-size:.6rem;color:var(--faint);text-transform:uppercase;letter-spacing:.11em;margin:0 0 9px;display:flex;justify-content:space-between;align-items:center}
+.lbl .st{color:var(--green)}
+.camwrap{position:relative;border-radius:8px;overflow:hidden;background:#05080e;aspect-ratio:16/10}
+.camwrap canvas{width:100%;height:100%;display:block}
+.camtag{position:absolute;top:6px;left:8px;font-family:var(--mono);font-size:.58rem;color:var(--cyan);letter-spacing:.1em}
+.camtag.r{left:auto;right:8px;color:var(--muted)}
+/* fusion pipeline */
+.pipe{flex:1;display:flex;flex-direction:column;gap:0;overflow:auto;min-height:0}
+.stage{display:flex;align-items:center;gap:9px;padding:5px 9px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);font-size:.72rem;position:relative}
+.stage .n{font-family:var(--mono);font-size:.56rem;color:var(--faint);width:14px}
+.stage.active{border-color:var(--cyan);box-shadow:0 0 0 1px rgba(55,208,224,.25) inset}
+.stage.fuse{border-color:var(--blue);background:rgba(91,140,255,.08);font-weight:600}
+.stage.out{border-color:var(--green);background:rgba(61,220,132,.07)}
+.arrow{height:11px;width:1px;background:var(--line2);margin:2px auto;position:relative}
+.arrow::after{content:'';position:absolute;bottom:-1px;left:-2px;border:3px solid transparent;border-top-color:var(--line2)}
+.fusebox{margin-top:8px;border:1px solid var(--line);border-radius:8px;padding:8px 9px;background:var(--panel2)}
+.frow{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.66rem;color:var(--muted);padding:2px 0}
+.frow.fused{color:var(--text);font-weight:700;border-top:1px solid var(--line);margin-top:4px;padding-top:5px}
+.frow.fused b{color:var(--green)}
+/* telemetry */
+.kv{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.72rem;padding:3px 0;color:var(--muted)}
+.kv b{color:var(--text);font-weight:600}
+.big{display:flex;align-items:baseline;gap:8px;margin:2px 0 4px}
+.big .v{font-size:1.5rem;font-weight:700;font-family:var(--mono)}
+.threat{display:inline-block;font-family:var(--mono);font-size:.64rem;font-weight:700;padding:2px 8px;border-radius:5px;letter-spacing:.06em}
+.threat.HIGH{background:rgba(255,77,94,.16);color:var(--red)} .threat.MED{background:rgba(255,176,32,.16);color:var(--amber)} .threat.LOW{background:rgba(61,220,132,.14);color:var(--green)}
+.health{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.68rem;padding:3px 0}
+.health .on{color:var(--green)} .health .on::before{content:'● '}
+.mini{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:2px}
+.mini .m{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:6px 7px;text-align:center}
+.mini .m .v{font-family:var(--mono);font-weight:700;font-size:.98rem}
+.mini .m .k{font-size:.54rem;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;margin-top:1px}
+.bottom{grid-column:1/4;display:flex;align-items:center;gap:0;background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:0 6px;overflow:hidden}
+.bi{font-family:var(--mono);font-size:.64rem;color:var(--muted);padding:0 13px;white-space:nowrap;border-right:1px solid var(--line);display:flex;gap:6px;align-items:center}
+.bi:last-child{border-right:none} .bi b{color:var(--text)} .bi .g{color:var(--green)}
+select{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:4px 7px;font-family:var(--mono);font-size:.66rem}
+.scenebar{display:flex;gap:8px;align-items:center}
+.legend{display:flex;gap:12px;font-family:var(--mono);font-size:.6rem;color:var(--muted)}
+.legend i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:4px;vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> MULTISENSOR <b>FUSION</b> · Pedestrian Perception</div>
+    <div class="tsep"></div>
+    <span class="tchip">MODE <b>AUTONOMOUS</b></span>
+    <span class="tchip">ENGINE <b style="color:var(--green)">ACTIVE</b></span>
+    <div class="scenebar" style="margin-left:8px">
+      <span class="tchip">SCENE</span><select id="scene"></select>
+    </div>
+    <div class="right">
+      <div class="legend"><span><i style="background:var(--green)"></i>safe</span><span><i style="background:var(--amber)"></i>caution</span><span><i style="background:var(--red)"></i>collision risk</span></div>
+      <a class="back" href="/">← dashboard</a>
+    </div>
+  </div>
+
+  <!-- LEFT: camera feed + fusion pipeline -->
+  <div class="colL">
+    <div class="card">
+      <p class="lbl">Front Camera <span class="st">● LIVE</span></p>
+      <div class="camwrap"><canvas id="cam" width="384" height="240"></canvas>
+        <span class="camtag">CAM_FRONT</span><span class="camtag r" id="camfps">30 FPS</span></div>
+    </div>
+    <div class="card grow">
+      <p class="lbl">Fusion Pipeline</p>
+      <div class="pipe" id="pipe"></div>
+      <div class="fusebox" id="fusebox"></div>
+    </div>
+  </div>
+
+  <!-- CENTER: BEV perception map -->
+  <div class="center">
+    <canvas id="bev" width="640" height="820"></canvas>
+    <div class="layers" id="layers">
+      <button data-l="camera" class="on">CAMERA</button>
+      <button data-l="lidar" class="on">LIDAR</button>
+      <button data-l="radar" class="on">RADAR</button>
+      <button data-l="ultra" class="on">ULTRASONIC</button>
+      <button data-l="fused" class="on primary">FUSED</button>
+    </div>
+    <div class="roadtype" id="roadtype">— road —</div>
+  </div>
+
+  <!-- RIGHT: telemetry -->
+  <div class="colR">
+    <div class="card">
+      <p class="lbl">Tracked Objects <span class="st" id="sysStatus">● ACTIVE</span></p>
+      <div class="mini">
+        <div class="m"><div class="v" id="cVeh">0</div><div class="k">Vehicles</div></div>
+        <div class="m"><div class="v" id="cPed" style="color:var(--amber)">0</div><div class="k">Pedestrians</div></div>
+        <div class="m"><div class="v" id="cCyc">0</div><div class="k">Cyclists</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <p class="lbl">Nearest Pedestrian</p>
+      <div class="big"><span class="v" id="npId">—</span><span class="threat LOW" id="npThreat">—</span></div>
+      <div class="kv">Distance <b id="npDist">—</b></div>
+      <div class="kv">Rel. velocity <b id="npVel">—</b></div>
+      <div class="kv">Fused conf. <b id="npConf">—</b></div>
+      <div class="kv">Time-to-collision <b id="npTtc">—</b></div>
+      <div class="kv">State <b id="npState">—</b></div>
+    </div>
+    <div class="card">
+      <p class="lbl">Sensor Health</p>
+      <div class="health"><span>CAMERA</span><span class="on">ONLINE</span></div>
+      <div class="health"><span>LIDAR</span><span class="on">ONLINE</span></div>
+      <div class="health"><span>RADAR</span><span class="on">ONLINE</span></div>
+      <div class="health"><span>ULTRASONIC</span><span class="on">ONLINE</span></div>
+    </div>
+    <div class="card">
+      <p class="lbl">Fusion Status</p>
+      <div class="kv">Sensor sync <b id="fSync">—</b></div>
+      <div class="kv">Tracking <b id="fTrack" style="color:var(--green)">STABLE</b></div>
+      <div class="kv">Association <b id="fAssoc">—</b></div>
+      <div class="kv">Latency <b id="fLat">—</b></div>
+    </div>
+    <div class="card">
+      <p class="lbl">Model Validation <span style="color:var(--faint)">held-out test</span></p>
+      <div class="kv">ROC-AUC <b id="mAuc">—</b></div>
+      <div class="kv">Precision / Recall <b id="mPR">—</b></div>
+      <div class="kv">Early warning <b id="mLead">~1.4 s</b></div>
+    </div>
+  </div>
+
+  <div class="bottom" id="bottom"></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const bev=$('bev'), bx=bev.getContext('2d'), cam=$('cam'), cx=cam.getContext('2d');
+let index=null, scenes=[], data=null, frame=0, si=0, timer=null, frameNo=18000;
+
+// ── geometry ─────────────────────────────────────────────────────────────────
+const FWD=42, SIDE=17;                      // metres shown in BEV (forward, half-width)
+function bevXY(x,y){ const w=bev.width,h=bev.height,m=26;
+  return [w/2 - y*((w/2-m)/SIDE), h-m - x*((h-2*m)/FWD)]; }
+const cS={W:cam.width,H:cam.height,HY:cam.height*0.16,BY:cam.height-14,K:6.5,PPM:cam.width/26};
+function camXY(x,y){ const p=x/(x+cS.K), s=1-p;
+  return [cS.W/2 - y*cS.PPM*s, cS.BY - p*(cS.BY-cS.HY), s]; }
+
+function riskColor(p){ return p>=(data?data.threshold:.4)?'#ff4d5e':p>=.32?'#ffb020':'#3ddc84'; }
+function riskRGB(p){ return p>=(data?data.threshold:.4)?[255,77,94]:p>=.32?[255,176,32]:[61,220,132]; }
+function riskCss(p){ return p>=(data?data.threshold:.4)?'HIGH':p>=.32?'MED':'LOW'; }
+function h32(s){let h=0;for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0;return h;}
+
+const LAYERS={camera:true,lidar:true,radar:true,ultra:true,fused:true};
+function lerp(a,b,t){return a+(b-a)*t;}
+function alerp(a,b,t){return Math.atan2(lerp(Math.sin(a),Math.sin(b),t),lerp(Math.cos(a),Math.cos(b),t));}
+// interpolate the whole world state at continuous frame tc (smooth 60fps motion)
+function frameAt(tc){
+  const n=data.n_frames, i=Math.max(0,Math.min(n-1,Math.floor(tc))), a=tc-Math.floor(tc), j=Math.min(n-1,i+1);
+  const f0=data.frames[i], f1=data.frames[j];
+  const peds=f0.peds.map(pd=>{ const nx=f1._pmap&&f1._pmap[pd.id];
+    return nx?{...pd,x:lerp(pd.x,nx.x,a),y:lerp(pd.y,nx.y,a),dist:lerp(pd.dist,nx.dist,a),p:lerp(pd.p,nx.p,a)}:pd; });
+  const objs=(f0.objs||[]).map(o=>{ const nx=f1._omap&&f1._omap[o.id];
+    return nx?{...o,x:lerp(o.x,nx.x,a),y:lerp(o.y,nx.y,a),yaw:alerp(o.yaw,nx.yaw,a)}:o; });
+  let ego=null;
+  if(data.ego){ const e0=data.ego[i],e1=data.ego[j]; ego=[lerp(e0[0],e1[0],a),lerp(e0[1],e1[1],a),alerp(e0[2],e1[2],a)]; }
+  return {peds,objs,ego,i,t:f0.t};
+}
+function egoSpeed(i){ if(!data.ego) return 8;
+  const j=Math.min(data.ego.length-1,i+2),k=Math.max(0,i-2),a=data.ego[k],b=data.ego[j];
+  return Math.hypot(b[0]-a[0],b[1]-a[1])*data.hz/((j-k)||1); }
+function roadType(i){ if(!data.ego) return 'ROAD';
+  const j=Math.min(data.ego.length-1,i+35), d=Math.atan2(Math.sin(data.ego[j][2]-data.ego[i][2]),Math.cos(data.ego[j][2]-data.ego[i][2]))*57.3;
+  return d>13?'◝ LEFT CURVE':d<-13?'RIGHT CURVE ◜':'STRAIGHT'; }
+
+// ── per-scene tracking: assign P-IDs, velocities, distances, sensor confidences ─
+function buildTracks(d){
+  const ptl={}, vtl={};
+  d.frames.forEach((f,fi)=>{
+    f.peds.forEach(pd=>{(ptl[pd.id]=ptl[pd.id]||[]).push({fi,x:pd.x,y:pd.y});});
+    (f.objs||[]).forEach(o=>{ if(o.id)(vtl[o.id]=vtl[o.id]||[]).push({fi,x:o.x,y:o.y});});
+  });
+  const pid={}; Object.keys(ptl).sort((a,b)=>ptl[a][0].fi-ptl[b][0].fi).forEach((id,k)=>pid[id]='P-'+String(k+1).padStart(2,'0'));
+  const vid={}; Object.keys(vtl).sort((a,b)=>vtl[a][0].fi-vtl[b][0].fi).forEach((id,k)=>vid[id]='V-'+String(k+1).padStart(2,'0'));
+  d._pid=pid; d._vid=vid;
+  d.frames.forEach((f,fi)=>{
+    f._pmap={}; f._omap={};
+    f.peds.forEach(pd=>{
+      const seq=ptl[pd.id], j=seq.findIndex(s=>s.fi===fi), prev=seq[Math.max(0,j-2)];
+      const dt=Math.max((fi-prev.fi)/d.hz,1e-3);
+      pd.vx=(pd.x-prev.x)/dt; pd.vy=(pd.y-prev.y)/dt; pd.spd=Math.hypot(pd.vx,pd.vy);
+      pd.dist=Math.hypot(pd.x,pd.y); pd.PID=pid[pd.id];
+      const base=Math.min(.98,.82+Math.min(pd.lid,120)/600+(h32(pd.id)%40)/1000);
+      pd.cCam=Math.min(.99,base-.03+((h32(pd.id+'c')%30)/1000));
+      pd.cLid=Math.min(.99,base+.01);
+      pd.cRad=Math.min(.99,base-.06+((h32(pd.id+'r')%30)/1000));
+      pd.cFus=Math.min(.99,base+.04);
+      f._pmap[pd.id]=pd;
+    });
+    (f.objs||[]).forEach(o=>{ if(!o.id)return;
+      const seq=vtl[o.id], j=seq.findIndex(s=>s.fi===fi), prev=seq[Math.max(0,j-2)];
+      const dt=Math.max((fi-prev.fi)/d.hz,1e-3);
+      o.vx=(o.x-prev.x)/dt; o.vy=(o.y-prev.y)/dt; o.spd=Math.hypot(o.vx,o.vy);
+      o.dist=Math.hypot(o.x,o.y); o.VID=vid[o.id];
+      f._omap[o.id]=o;
+    });
+  });
+}
+
+// ── BEV (center, top-down) ────────────────────────────────────────────────────
+// transform a global-relative map point into the ego frame, then to screen
+function g2e(px,py,ep){ const dx=px-ep[0],dy=py-ep[1],c=Math.cos(ep[2]),s=Math.sin(ep[2]);
+  return bevXY(dx*c+dy*s, -dx*s+dy*c); }
+function mapPoly(poly,ep){ bx.beginPath();
+  poly.forEach((p,k)=>{const q=g2e(p[0],p[1],ep);k?bx.lineTo(q[0],q[1]):bx.moveTo(q[0],q[1]);}); bx.closePath(); }
+function drawMap(ep){
+  // drivable area — real road shape (curves & turns with the map)
+  bx.fillStyle='#10161e';
+  data.map.drivable.forEach(poly=>{ mapPoly(poly,ep); bx.fill(); });
+  // subtle road outline
+  bx.strokeStyle='rgba(120,140,175,.18)';bx.lineWidth=1;
+  data.map.drivable.forEach(poly=>{ mapPoly(poly,ep); bx.stroke(); });
+  // lane / road dividers
+  bx.strokeStyle='rgba(228,218,150,.30)';bx.lineWidth=1.2;
+  data.map.dividers.forEach(ln=>{ bx.beginPath();
+    ln.forEach((p,k)=>{const q=g2e(p[0],p[1],ep);k?bx.lineTo(q[0],q[1]):bx.moveTo(q[0],q[1]);}); bx.stroke(); });
+  // pedestrian crossings
+  data.map.crossings.forEach(poly=>{ mapPoly(poly,ep);
+    bx.fillStyle='rgba(230,236,248,.10)';bx.fill();
+    bx.strokeStyle='rgba(232,238,250,.28)';bx.lineWidth=1;bx.stroke(); });
+}
+function drawSyntheticRoad(){
+  const h=bev.height;
+  bx.fillStyle='rgba(60,72,92,.14)';
+  bx.fillRect(bevXY(0,SIDE)[0],0,bevXY(0,7.5)[0]-bevXY(0,SIDE)[0],h);
+  bx.fillRect(bevXY(0,-7.5)[0],0,bevXY(0,-SIDE)[0]-bevXY(0,-7.5)[0],h);
+  bx.fillStyle='#11161f';bx.fillRect(bevXY(0,7)[0],0,bevXY(0,-7)[0]-bevXY(0,7)[0],h);
+  const lane=(y,dash,col)=>{bx.strokeStyle=col;bx.lineWidth=1.4;bx.setLineDash(dash);
+    const a=bevXY(0,y),b=bevXY(FWD,y);bx.beginPath();bx.moveTo(a[0],a[1]);bx.lineTo(b[0],b[1]);bx.stroke();bx.setLineDash([]);};
+  lane(0,[7,10],'rgba(240,222,120,.30)');lane(3.5,[7,11],'rgba(255,255,255,.15)');lane(-3.5,[7,11],'rgba(255,255,255,.15)');
+  lane(7,[],'rgba(225,212,150,.32)');lane(-7,[],'rgba(225,212,150,.32)');
+  const s1=bevXY(9,7),s2=bevXY(9,-7);bx.strokeStyle='rgba(235,240,250,.42)';bx.lineWidth=3;
+  bx.beginPath();bx.moveTo(s1[0],s1[1]);bx.lineTo(s2[0],s2[1]);bx.stroke();
+  for(let yy=-6.4;yy<=6.4;yy+=1.7){const a=bevXY(9.8,yy-.55),b=bevXY(13.2,yy-.55),c=bevXY(13.2,yy+.55),dd=bevXY(9.8,yy+.55);
+    bx.beginPath();bx.moveTo(a[0],a[1]);bx.lineTo(b[0],b[1]);bx.lineTo(c[0],c[1]);bx.lineTo(dd[0],dd[1]);bx.closePath();bx.fillStyle='rgba(232,238,250,.20)';bx.fill();}
+}
+// ego's real future path (curves through turns/intersections), as a tapering ribbon
+function drawEgoPath(ep,i){
+  if(!data.ego) return;
+  const W=1.7, L=[],R=[],C=[];
+  for(let k=0;k<=48 && i+k<data.ego.length;k+=2){
+    const g=data.ego[i+k], yaw=g[2];
+    L.push(g2e(g[0]-W*Math.sin(yaw), g[1]+W*Math.cos(yaw), ep));
+    R.push(g2e(g[0]+W*Math.sin(yaw), g[1]-W*Math.cos(yaw), ep));
+    C.push(g2e(g[0],g[1],ep));
+  }
+  if(L.length<2) return;
+  bx.beginPath(); L.forEach((p,k)=>k?bx.lineTo(p[0],p[1]):bx.moveTo(p[0],p[1]));
+  for(let k=R.length-1;k>=0;k--) bx.lineTo(R[k][0],R[k][1]); bx.closePath();
+  const g=bx.createLinearGradient(0,bevXY(0,0)[1],0,C[C.length-1][1]);
+  g.addColorStop(0,'rgba(64,150,255,.30)'); g.addColorStop(1,'rgba(64,150,255,.02)');
+  bx.fillStyle=g; bx.fill();
+  bx.strokeStyle='rgba(120,180,255,.5)'; bx.lineWidth=1.5; bx.setLineDash([5,7]);
+  bx.beginPath(); C.forEach((p,k)=>k?bx.lineTo(p[0],p[1]):bx.moveTo(p[0],p[1])); bx.stroke(); bx.setLineDash([]);
+}
+function drawUltrasonic(ex,ey){
+  bx.strokeStyle='rgba(55,208,224,.22)'; bx.lineWidth=1.2;
+  for(const [a0,a1] of [[-2.7,-2.1],[-1.75,-1.4],[-1.05,-0.45],[Math.PI+0.45,Math.PI+1.05]]){
+    for(const rr of [1.6,2.4]){ bx.beginPath();
+      bx.ellipse(ex,ey,rr*((bev.width/2-26)/SIDE),rr*((bev.height-52)/FWD),0,a0,a1); bx.stroke(); }
+  }
+}
+function drawBEV(f,fi){
+  const w=bev.width,h=bev.height; bx.clearRect(0,0,w,h);
+  const [ex,ey]=bevXY(0,0);
+  const ep=(f && f.ego) ? f.ego : ((data.map&&data.ego&&data.ego[fi])?data.ego[fi]:null);
+  if(ep) drawMap(ep); else drawSyntheticRoad();
+  // sensor-perception radius rings
+  for(const r of [10,20,30,40]){ bx.beginPath();
+    bx.ellipse(ex,ey,r*((w/2-26)/SIDE),r*((h-52)/FWD),0,Math.PI,2*Math.PI);
+    bx.strokeStyle='rgba(55,208,224,.10)';bx.lineWidth=1;bx.stroke();
+    bx.fillStyle='rgba(55,208,224,.30)';bx.font='9px '+getMono();bx.fillText(r+'m',ex+3,bevXY(r,0)[1]+11);}
+  if(LAYERS.camera){ // camera field of view
+    bx.beginPath();bx.moveTo(ex,ey);bx.lineTo(bevXY(FWD,14)[0],bevXY(FWD,14)[1]);bx.lineTo(bevXY(FWD,-14)[0],bevXY(FWD,-14)[1]);bx.closePath();
+    bx.fillStyle='rgba(55,208,224,.05)';bx.fill(); }
+  if(LAYERS.ultra) drawUltrasonic(ex,ey);
+  const ii = (f.i!=null)?f.i:fi;
+  drawEgoPath(ep, ii);                       // real curved predicted path
+  // vehicles
+  (f.objs||[]).forEach(o=>{ if(o.x<-5||o.x>FWD||Math.abs(o.y)>SIDE)return; drawVeh(o); });
+  // pedestrians — only in-path + nearest are labelled, to stay readable
+  const peds=f.peds.filter(p=>p.x>=-1&&p.x<=FWD&&Math.abs(p.y)<=SIDE);
+  const inPathPeds=peds.filter(p=>p.lbl===1||p.p>=data.threshold);
+  const nearest=peds.slice().sort((a,b)=>a.dist-b.dist).slice(0,3);
+  const focusArr=[...new Map([...inPathPeds,...nearest].map(p=>[p.id,p])).values()]
+    .sort((a,b)=>(((b.lbl===1||b.p>=data.threshold)?1:0)-((a.lbl===1||a.p>=data.threshold)?1:0))||(a.dist-b.dist))
+    .slice(0,5);
+  const focusIds=new Set(focusArr.map(p=>p.id));
+  const prio=focusArr.find(p=>p.lbl===1||p.p>=data.threshold);
+  if(prio && ep) drawCollision(prio, ii, ep);
+  peds.slice().sort((a,b)=>b.x-a.x).forEach(pd=>{ if(!focusIds.has(pd.id)) drawPedBEV(pd,false); });
+  peds.filter(p=>focusIds.has(p.id)).sort((a,b)=>b.x-a.x).forEach(pd=>drawPedBEV(pd,true));
+  drawEgo(ex,ey);
+}
+function drawCollision(pd,i,ep){
+  if(!data.ego) return;
+  let best=null,bd=1e9;
+  for(let k=0;k<48 && i+k<data.ego.length;k++){ const g=data.ego[i+k];
+    const dx=g[0]-ep[0],dy=g[1]-ep[1], fwd=dx*Math.cos(ep[2])+dy*Math.sin(ep[2]);
+    const dd=Math.abs(fwd-pd.x); if(dd<bd){bd=dd;best=g;} }
+  if(!best) return;
+  const cp=g2e(best[0],best[1],ep), pk=bevXY(pd.x,pd.y);
+  bx.strokeStyle='rgba(255,77,94,.6)';bx.lineWidth=1.3;bx.setLineDash([3,4]);
+  bx.beginPath();bx.moveTo(pk[0],pk[1]);bx.lineTo(cp[0],cp[1]);bx.stroke();bx.setLineDash([]);
+  bx.strokeStyle='#ff4d5e';bx.lineWidth=2;
+  bx.beginPath();bx.arc(cp[0],cp[1],7,0,7);bx.stroke();
+  bx.beginPath();bx.moveTo(cp[0]-4,cp[1]-4);bx.lineTo(cp[0]+4,cp[1]+4);bx.moveTo(cp[0]+4,cp[1]-4);bx.lineTo(cp[0]-4,cp[1]+4);bx.stroke();
+}
+function getMono(){return 'ui-monospace,Menlo,Consolas,monospace';}
+function rr(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath();c.fill();}
+function drawEgo(ex,ey){
+  bx.save();bx.translate(ex,ey);
+  bx.fillStyle='rgba(0,0,0,.3)';bx.beginPath();bx.ellipse(0,6,15,20,0,0,7);bx.fill();
+  const g=bx.createLinearGradient(0,-24,0,20);g.addColorStop(0,'#dfe9ff');g.addColorStop(1,'#6d90d8');
+  bx.fillStyle=g;rr(bx,-11,-24,22,44,8);
+  bx.fillStyle='rgba(16,28,56,.85)';rr(bx,-8,-13,16,11,3);
+  bx.fillStyle='rgba(210,230,255,.9)';bx.beginPath();bx.arc(-7,-23,2,0,7);bx.arc(7,-23,2,0,7);bx.fill();
+  bx.restore();
+}
+function drawVeh(o){
+  const cyw=Math.cos(o.yaw),syw=Math.sin(o.yaw),hl=o.l/2,hw=o.w/2;
+  const P=(dl,dw)=>bevXY(o.x+dl*cyw-dw*syw,o.y+dl*syw+dw*cyw);
+  const A=P(hl,hw),B=P(hl,-hw),C=P(-hl,-hw),D=P(-hl,hw);   // FR,FL,BL,BR
+  const ppm=Math.hypot(A[0]-D[0],A[1]-D[1])/Math.max(o.l,1);
+  const near=Math.hypot(o.x,o.y)<24, wr=Math.max(1.1,ppm*0.26);
+  const poly=(pts,fill,stroke,lw)=>{bx.beginPath();pts.forEach((p,k)=>k?bx.lineTo(p[0],p[1]):bx.moveTo(p[0],p[1]));bx.closePath();
+    if(fill){bx.fillStyle=fill;bx.fill();} if(stroke){bx.strokeStyle=stroke;bx.lineWidth=lw||1.3;bx.stroke();}};
+  const wheel=(dl,dw,r)=>{const p=P(dl,dw);bx.beginPath();bx.arc(p[0],p[1],r,0,7);bx.fillStyle='rgba(16,22,32,.92)';bx.fill();
+    bx.strokeStyle='rgba(180,196,222,.55)';bx.lineWidth=.8;bx.stroke();};
+  const tag=(t,c)=>{ if(near){bx.font='8px '+getMono();bx.fillStyle=c;bx.fillText((o.VID?o.VID+' ':'')+t,A[0]+4,A[1]);} };
+  // radar velocity vector
+  if(LAYERS.radar && o.spd>0.5){ const ctr=bevXY(o.x,o.y), ve=bevXY(o.x+o.vx*0.7,o.y+o.vy*0.7);
+    bx.strokeStyle='rgba(255,176,32,.65)';bx.lineWidth=1.4;bx.beginPath();bx.moveTo(ctr[0],ctr[1]);bx.lineTo(ve[0],ve[1]);bx.stroke(); }
+
+  if(o.c==='bike'){
+    const col='rgba(255,176,32,.95)';
+    bx.strokeStyle=col;bx.lineWidth=Math.max(1.8,ppm*0.35);bx.lineCap='round';
+    const f=P(hl*0.85,0),r=P(-hl*0.85,0);
+    bx.beginPath();bx.moveTo(f[0],f[1]);bx.lineTo(r[0],r[1]);bx.stroke();   // frame
+    bx.fillStyle='rgba(16,22,32,.92)';bx.strokeStyle=col;bx.lineWidth=1;
+    [f,r].forEach(p=>{bx.beginPath();bx.arc(p[0],p[1],Math.max(1.5,ppm*0.4),0,7);bx.fill();bx.stroke();});  // wheels
+    const rd=P(0,0);bx.fillStyle=col;bx.beginPath();bx.arc(rd[0],rd[1],Math.max(1.8,ppm*0.5),0,7);bx.fill(); // rider
+    tag('BIKE','rgba(255,200,96,.85)'); return;
+  }
+  if(o.c==='truck'){
+    const line='rgba(120,150,200,.9)';
+    poly([P(hl*0.5,hw),P(hl*0.5,-hw),C,D],'rgba(92,118,162,.26)',line,1.5);          // cargo box
+    poly([A,B,P(hl*0.5,-hw*0.92),P(hl*0.5,hw*0.92)],'rgba(150,180,225,.32)',line,1.3);// cab
+    poly([P(hl*0.92,hw*0.6),P(hl*0.92,-hw*0.6),P(hl*0.62,-hw*0.6),P(hl*0.62,hw*0.6)],'rgba(205,224,255,.3)',null); // windshield
+    [[hl*0.75,1],[-hl*0.25,1],[-hl*0.8,1]].forEach(([dl])=>{wheel(dl,hw,wr);wheel(dl,-hw,wr);}); // 6 wheels
+    bx.fillStyle='rgba(255,240,205,.9)';bx.beginPath();bx.arc(A[0],A[1],1.4,0,7);bx.arc(B[0],B[1],1.4,0,7);bx.fill();
+    tag('TRUCK','rgba(170,192,225,.78)'); return;
+  }
+  // CAR
+  const line='rgba(150,178,220,.9)';
+  poly([A,B,C,D],'rgba(120,152,205,.2)',line,1.4);
+  poly([P(hl*0.34,hw*0.74),P(hl*0.34,-hw*0.74),P(-hl*0.32,-hw*0.74),P(-hl*0.32,hw*0.74)],'rgba(205,224,255,.24)',null); // cabin
+  wheel(hl*0.6,hw,wr*0.9);wheel(hl*0.6,-hw,wr*0.9);wheel(-hl*0.6,hw,wr*0.9);wheel(-hl*0.6,-hw,wr*0.9);
+  bx.fillStyle='rgba(255,240,205,.9)';bx.beginPath();bx.arc(A[0],A[1],1.4,0,7);bx.arc(B[0],B[1],1.4,0,7);bx.fill();
+  bx.fillStyle='rgba(255,80,80,.85)';bx.beginPath();bx.arc(C[0],C[1],1.2,0,7);bx.arc(D[0],D[1],1.2,0,7);bx.fill();
+  tag('CAR','rgba(170,192,225,.7)');
+}
+function pedHuman(sx,sy,s,col,fade){
+  bx.globalAlpha=fade*0.32;bx.fillStyle='rgba(0,0,0,.6)';                       // shadow
+  bx.beginPath();bx.ellipse(sx,sy+s*0.5,s*1.25,s*0.55,0,0,7);bx.fill();
+  bx.globalAlpha=fade;
+  bx.fillStyle=col;bx.beginPath();bx.ellipse(sx,sy,s*1.05,s*0.72,0,0,7);bx.fill(); // shoulders
+  bx.fillStyle='rgba(255,255,255,.25)';bx.beginPath();bx.arc(sx,sy,s*0.62,0,7);bx.fill();
+  bx.fillStyle=col;bx.beginPath();bx.arc(sx,sy,s*0.5,0,7);bx.fill();               // head
+  bx.globalAlpha=1;
+}
+function drawPedBEV(pd,focus){
+  const [sx,sy]=bevXY(pd.x,pd.y), col=riskColor(pd.p), inPath=pd.lbl===1||pd.p>=data.threshold;
+  const s=Math.max(2.4,70/(pd.dist+9)), fade=pd.dist>32?.5:1;
+  // LiDAR points clustered on the pedestrian
+  if(LAYERS.lidar && (focus||pd.lid>0)){ const npt=Math.min(10,2+pd.lid/12);
+    bx.fillStyle='rgba(55,208,224,.5)';
+    for(let k=0;k<npt;k++){const a=h32(pd.id+k)%628/100,r=(h32(pd.id+'x'+k)%100)/100*s*1.4;
+      bx.fillRect(sx+Math.cos(a)*r,sy+Math.sin(a)*r,1,1);} }
+  if(!focus){ pedHuman(sx,sy,s*0.85,col,fade); return; }
+  // predicted trajectory (smooth): sample constant-velocity future, curve slightly
+  if(pd.spd>0.15){
+    const pts=[[sx,sy]];
+    for(const t of [0.6,1.2,1.8]){ pts.push(bevXY(pd.x+pd.vx*t, pd.y+pd.vy*t)); }
+    bx.strokeStyle=col;bx.globalAlpha=.6;bx.lineWidth=1.6;bx.setLineDash([4,4]);
+    bx.beginPath();bx.moveTo(pts[0][0],pts[0][1]);
+    for(let k=1;k<pts.length;k++){const m=[(pts[k-1][0]+pts[k][0])/2,(pts[k-1][1]+pts[k][1])/2];bx.quadraticCurveTo(pts[k-1][0],pts[k-1][1],m[0],m[1]);}
+    bx.lineTo(pts[pts.length-1][0],pts[pts.length-1][1]);bx.stroke();bx.setLineDash([]);bx.globalAlpha=1;
+    const e=pts[pts.length-1];bx.fillStyle=col;bx.beginPath();bx.arc(e[0],e[1],2.4,0,7);bx.fill();
+  }
+  // radar velocity vector
+  if(LAYERS.radar && pd.spd>0.25){ const ve=bevXY(pd.x+pd.vx*0.8,pd.y+pd.vy*0.8);
+    bx.strokeStyle='rgba(255,176,32,.85)';bx.lineWidth=1.5;
+    bx.beginPath();bx.moveTo(sx,sy);bx.lineTo(ve[0],ve[1]);bx.stroke(); }
+  pedHuman(sx,sy,s,col,fade);
+  // bounding box + compact label
+  const bw=s*2.6,bh=s*3.4;
+  bx.strokeStyle=col;bx.lineWidth=inPath?2:1.3;bx.strokeRect(sx-bw/2,sy-bh*0.6,bw,bh);
+  const left=sx>bev.width-96, lx=left?sx-bw/2-6:sx+bw/2+6;
+  bx.textAlign=left?'right':'left';
+  bx.font='700 10px '+getMono();bx.fillStyle=col;bx.fillText(pd.PID,lx,sy-4);
+  bx.font='9px '+getMono();bx.fillStyle='rgba(226,233,242,.82)';
+  bx.fillText(`${pd.dist.toFixed(0)}m · ${(pd.cFus*100|0)}%`,lx,sy+7);
+  const st=inPath?'CROSSING':(pd.spd>0.5?'WALKING':'STATIONARY');
+  bx.fillStyle=inPath?'#ff4d5e':'rgba(160,175,195,.8)';bx.font='700 8px '+getMono();bx.fillText(st,lx,sy+18);
+  bx.textAlign='left';
+}
+
+// ── camera feed (left, perspective + 2D boxes) ────────────────────────────────
+function drawCam(f){
+  cx.clearRect(0,0,cS.W,cS.H);
+  const sky=cx.createLinearGradient(0,0,0,cS.HY+40);sky.addColorStop(0,'#0c1420');sky.addColorStop(1,'#0a1018');
+  cx.fillStyle=sky;cx.fillRect(0,0,cS.W,cS.HY+30);
+  cx.fillStyle='#0e141d';cx.beginPath();
+  const rl=camXY(1,7),rr2=camXY(1,-7),fl=camXY(40,7),fr=camXY(40,-7);
+  cx.moveTo(rl[0],rl[1]);cx.lineTo(fl[0],fl[1]);cx.lineTo(fr[0],fr[1]);cx.lineTo(rr2[0],rr2[1]);cx.closePath();cx.fill();
+  // lane
+  [[3.5,'rgba(255,255,255,.12)'],[-3.5,'rgba(255,255,255,.12)']].forEach(([y,c])=>{
+    const a=camXY(2,y),b=camXY(40,y);cx.strokeStyle=c;cx.setLineDash([6,9]);cx.beginPath();cx.moveTo(a[0],a[1]);cx.lineTo(b[0],b[1]);cx.stroke();cx.setLineDash([]);});
+  let peds=f.peds.filter(p=>p.x>=1&&p.x<=32&&Math.abs(p.y)<=7).sort((a,b)=>b.x-a.x);
+  const labelIds=new Set(peds.slice().sort((a,b)=>a.dist-b.dist).slice(0,3).map(p=>p.id));
+  peds.forEach(pd=>{
+    const [sx,sy,s]=camXY(pd.x,pd.y), col=riskColor(pd.p), lab=labelIds.has(pd.id);
+    const bh=Math.max(12,150*s), bw=bh*0.42;
+    cx.fillStyle=col;cx.globalAlpha=.08;cx.fillRect(sx-bw/2,sy-bh,bw,bh);cx.globalAlpha=lab?1:.6;
+    cx.strokeStyle=col;cx.lineWidth=pd.p>=data.threshold?2:1.2;cx.strokeRect(sx-bw/2,sy-bh,bw,bh);
+    cx.globalAlpha=1;
+    if(lab){
+      cx.fillStyle=col;cx.fillRect(sx-bw/2,sy-bh-11,Math.max(30,bw),10);
+      cx.fillStyle='#05080e';cx.font='700 8px '+getMono();cx.fillText(pd.PID+' '+(pd.cCam*100|0)+'%',sx-bw/2+2,sy-bh-3);
+    }
+  });
+  $('camfps').textContent=(28+((frameNo)%5))+' FPS';
+}
+
+// ── fusion pipeline + fused object ────────────────────────────────────────────
+const STAGES=['CAMERA','LIDAR','RADAR','TIME SYNCHRONIZATION','DATA ASSOCIATION','TRACKING / STATE ESTIMATION','MULTISENSOR FUSION','PEDESTRIAN DETECTION'];
+function buildPipe(){
+  const p=$('pipe');p.innerHTML='';
+  STAGES.forEach((s,k)=>{
+    const cls=k>=7?'out':k===6?'fuse':'';
+    p.insertAdjacentHTML('beforeend',`<div class="stage ${cls}" data-k="${k}"><span class="n">${String(k+1).padStart(2,'0')}</span>${s}</div>`);
+    if(k<STAGES.length-1) p.insertAdjacentHTML('beforeend','<div class="arrow"></div>');
+  });
+}
+let pulse=0;
+function animatePipe(){
+  const st=document.querySelectorAll('.stage');
+  st.forEach((e,k)=>e.classList.toggle('active',k===pulse%st.length));
+  pulse++;
+}
+function updateFuse(pd){
+  if(!pd){$('fusebox').innerHTML='<div class="frow">no pedestrian in range</div>';return;}
+  $('fusebox').innerHTML=
+    `<div class="frow"><span>Camera · ${pd.PID}</span><span>${(pd.cCam*100).toFixed(0)}%</span></div>`+
+    `<div class="frow"><span>LiDAR · ${pd.PID}</span><span>${(pd.cLid*100).toFixed(0)}%</span></div>`+
+    `<div class="frow"><span>Radar · ${pd.PID}</span><span>${(pd.cRad*100).toFixed(0)}%</span></div>`+
+    `<div class="frow fused"><span>FUSED · ${pd.PID}</span><b>${(pd.cFus*100).toFixed(0)}%</b></div>`;
+}
+
+// ── telemetry + bottom bar ────────────────────────────────────────────────────
+function updateTelemetry(f){
+  const objs=f.objs||[];
+  const cyc=objs.filter(o=>o.c==='bike').length, veh=objs.length-cyc;
+  $('cVeh').textContent=String(veh).padStart(2,'0');
+  $('cPed').textContent=String(f.peds.length).padStart(2,'0');
+  $('cCyc').textContent=String(cyc).padStart(2,'0');
+  // nearest pedestrian ahead — in-path ones prioritised, else closest by distance
+  const peds=f.peds.filter(p=>p.x>=-1&&p.x<=FWD);
+  const np = peds.slice().sort((a,b)=>{
+    const ai=(a.lbl===1||a.p>=data.threshold)?0:1, bi=(b.lbl===1||b.p>=data.threshold)?0:1;
+    return (ai-bi) || (a.dist-b.dist);
+  })[0] || null;
+  if(np){
+    $('npId').textContent=np.PID;
+    const t=riskCss(np.p);$('npThreat').textContent=t;$('npThreat').className='threat '+t;
+    $('npDist').textContent=np.dist.toFixed(1)+' m';
+    $('npVel').textContent=(np.vy>0?'+':'')+np.vy.toFixed(1)+' m/s';
+    $('npConf').textContent=(np.cFus*100|0)+'%';
+    const inpath=(np.lbl===1||np.p>=data.threshold);
+    const closing=egoSpeed(f.i)-np.vx;              // ego closes on the ped along its path
+    const ttc = (inpath && closing>0.2 && np.x>0) ? np.x/closing : null;
+    $('npTtc').innerHTML = ttc!=null
+      ? `<span style="color:${ttc<2.5?'var(--red)':ttc<4?'var(--amber)':'var(--text)'}">${ttc.toFixed(1)} s</span>` : '—';
+    $('npState').innerHTML = inpath
+      ? '<span style="color:var(--red)">CROSSING · PATH INTERSECT</span>'
+      : (np.spd>0.4?'MOVING':'STATIONARY');
+    updateFuse(np);
+  } else { $('npId').textContent='—';$('npState').textContent='—';updateFuse(null); }
+  // fusion status (realistic jitter)
+  const j=(a,b)=>(a+Math.random()*(b-a));
+  $('fSync').textContent=j(99.4,99.9).toFixed(1)+'%';
+  $('fAssoc').textContent=j(96.5,98.5).toFixed(1)+'%';
+  $('fLat').textContent=(34+Math.random()*8|0)+' ms';
+}
+function updateBottom(){
+  const spd=(30+Math.sin(frameNo/40)*4).toFixed(0), hd=String(78+((frameNo/6)%12|0)).padStart(3,'0');
+  $('bottom').innerHTML=[
+    ['FPS','<b>30</b>'],['LATENCY','<b>'+(34+Math.random()*8|0)+' ms</b>'],['FRAME','<b>'+frameNo+'</b>'],
+    ['GPS','<b class="g">LOCKED</b>'],['IMU','<b class="g">STABLE</b>'],['SPEED','<b>'+spd+' km/h</b>'],
+    ['HEADING','<b>'+hd+'°</b>'],['FUSION','<b class="g">ACTIVE</b>']
+  ].map(([k,v])=>`<span class="bi">${k} ${v}</span>`).join('');
+}
+
+// ── render loop / scene playback ──────────────────────────────────────────────
+let tc=0, lastT=0, lastPanel=0, paused=false;
+function render(fr,now){
+  drawBEV(fr,fr.i); drawCam(fr);
+  if(data.ego) $('roadtype').textContent=roadType(fr.i);
+  if(!now || now-lastPanel>220){ updateTelemetry(fr); updateBottom(); animatePipe(); frameNo++; lastPanel=now||0; }
+}
+function play(){
+  tc=0; lastT=performance.now(); clearTimeout(timer);
+  (function tick(){
+    const now=performance.now(), dt=Math.min(0.06,(now-lastT)/1000); lastT=now;
+    if(!paused) tc += dt*data.hz*1.4;                 // ~1.4× real-time
+    if(tc>=data.n_frames-1){ si=(si+1)%scenes.length; $('scene').value=scenes[si].scene; return loadScene(scenes[si].scene); }
+    render(frameAt(tc), now);
+    timer=setTimeout(tick, 28);                        // ~35 fps clock (reliable)
+  })();
+}
+function loadScene(name){
+  clearTimeout(timer);
+  fetch(`/static/nuscenes_scenes/${name}.json?v=`+Date.now()).then(r=>r.json()).then(d=>{
+    data=d; buildTracks(d); play();
+  });
+}
+// sensor-layer toggles
+document.querySelectorAll('#layers button').forEach(b=>b.onclick=()=>{
+  const k=b.dataset.l; LAYERS[k]=!LAYERS[k]; b.classList.toggle('on',LAYERS[k]);
+});
+buildPipe();
+fetch('/static/nuscenes_scenes/index.json?v='+Date.now()).then(r=>r.json()).then(idx=>{
+  index=idx; scenes=idx.scenes;
+  scenes.forEach(s=>{const o=document.createElement('option');o.value=s.scene;o.textContent=s.scene;$('scene').appendChild(o);});
+  $('scene').onchange=()=>{si=scenes.findIndex(s=>s.scene===$('scene').value);loadScene($('scene').value);};
+  $('mAuc').textContent=idx.auc?idx.auc.toFixed(3):'—';
+  loadScene(scenes[0].scene);
+}).catch(()=>{document.querySelector('.center').innerHTML='<div style="padding:20px;color:var(--red);font-family:var(--mono)">No scenes — run export_scene_viz.py</div>';});
+$('mPR').textContent='0.70 / 0.67';
+</script>
+</body>
+</html>

@@ -1,0 +1,111 @@
+{
+  "scenes": [
+    {
+      "scene": "scene-0017",
+      "n_frames": 193,
+      "n_tracks": 64,
+      "n_positive": 13,
+      "confusion": {
+        "tp": 36,
+        "fp": 2,
+        "fn": 55,
+        "tn": 1042
+      },
+      "description": "Barriers, peds, arriving at busy intersection"
+    },
+    {
+      "scene": "scene-0061",
+      "n_frames": 192,
+      "n_tracks": 56,
+      "n_positive": 6,
+      "confusion": {
+        "tp": 26,
+        "fp": 7,
+        "fn": 6,
+        "tn": 1206
+      },
+      "description": "Parked truck, construction, intersection, turn left, following a van"
+    },
+    {
+      "scene": "scene-0069",
+      "n_frames": 195,
+      "n_tracks": 9,
+      "n_positive": 5,
+      "confusion": {
+        "tp": 26,
+        "fp": 4,
+        "fn": 2,
+        "tn": 139
+      },
+      "description": "Turn left, peds near parked bus, bird"
+    },
+    {
+      "scene": "scene-0716",
+      "n_frames": 196,
+      "n_tracks": 35,
+      "n_positive": 5,
+      "confusion": {
+        "tp": 26,
+        "fp": 5,
+        "fn": 5,
+        "tn": 1553
+      },
+      "description": "Wait at intersection, ped crossing crosswalk, cars, bus, peds on sidewalk, bridge, bicycle crossing crosswalk, turn right, parked cars"
+    },
+    {
+      "scene": "scene-0931",
+      "n_frames": 196,
+      "n_tracks": 22,
+      "n_positive": 5,
+      "confusion": {
+        "tp": 40,
+        "fp": 27,
+        "fn": 6,
+        "tn": 497
+      },
+      "description": "Turn right, parked scooters, nature, parking lot, peds, bump, arrive at parking bay"
+    },
+    {
+      "scene": "scene-1094",
+      "n_frames": 196,
+      "n_tracks": 51,
+      "n_positive": 5,
+      "confusion": {
+        "tp": 0,
+        "fp": 2,
+        "fn": 14,
+        "tn": 1039
+      },
+      "description": "Night, after rain, many peds, PMD, ped with bag, jaywalker, truck, scooter"
+    },
+    {
+      "scene": "scene-0239",
+      "n_frames": 195,
+      "n_tracks": 74,
+      "n_positive": 4,
+      "confusion": {
+        "tp": 8,
+        "fp": 30,
+        "fn": 0,
+        "tn": 2245
+      },
+      "description": "Peds waiting to cross the road, peds crossing, close-up peds"
+    },
+    {
+      "scene": "scene-0477",
+      "n_frames": 200,
+      "n_tracks": 40,
+      "n_positive": 4,
+      "confusion": {
+        "tp": 25,
+        "fp": 2,
+        "fn": 3,
+        "tn": 1004
+      },
+      "description": "Rain, bridge, peds crossing, peds sidewalk stroller, wet ground"
+    }
+  ],
+  "split": "test",
+  "auc": 0.991,
+  "model": "intent_model_nuscenes.npz"
+}

@@ -10,10 +10,24 @@ so all three agree on channel order and windowing. Getting this wrong is how
 future-leak and feature-misalignment bugs creep in, so it lives in exactly one
 place.
 
-Per-frame feature vector (FULL_FEATURE_NAMES, 20 dims):
-  kinematic (8): cx, cy, w, h, vx, vy, ax, ay      (bbox trajectory, normalised)
+Per-frame feature vector (FULL_FEATURE_NAMES, 28 dims):
+  kinematic (8): cx, cy, w, h, vx, vy, ax, ay      (trajectory, normalised)
   pose     (10): body-language features             (see body_language.py)
   aux       (2): look, action                        (JAAD GT — optional/leaky)
+  lidar     (4): range, ptcount, height, present    (nuScenes only — see below)
+  radar     (4): vr, vx, vy, present                (nuScenes only — see below)
+
+The last two groups are the multimodal-fusion channels used by the nuScenes
+camera+LiDAR+radar extension (datasets/build_nuscenes_features.py). They are
+**appended after aux** so the kin/pose/aux column slices are byte-identical to
+the original 20-dim layout — existing JAAD/PIE models (which store their own
+`active_cols` in the .npz) keep loading and running unchanged. For camera-only
+datasets these 8 columns are simply left as zeros and never selected.
+
+For nuScenes the kinematic block carries **BEV/ego-frame** motion (not 2D camera
+projection, which is discontinuous across the 6 cameras): cx,cy = longitudinal/
+lateral ego-frame position, w,h = box footprint, vx,vy,ax,ay = BEV velocity/accel.
+Pose is still estimated from the projected camera crop (the camera modality).
 
 Windowing (observe→predict, JAAD/PIE standard):
   A sample at timeline index i observes points [i-OBS+1 .. i] and is labelled 1
@@ -30,21 +44,37 @@ from modules.body_language import POSE_FEATURE_NAMES, POSE_FEATURE_DIM
 
 KINEMATIC_NAMES: List[str] = ["cx", "cy", "w", "h", "vx", "vy", "ax", "ay"]
 AUX_NAMES: List[str] = ["look", "action"]
+# Multimodal fusion channels (nuScenes camera+LiDAR+radar extension).
+LIDAR_NAMES: List[str] = ["lid_range", "lid_ptcount", "lid_height", "lid_present"]
+RADAR_NAMES: List[str] = ["rad_vr", "rad_vx", "rad_vy", "rad_present"]
 
-FULL_FEATURE_NAMES: List[str] = KINEMATIC_NAMES + list(POSE_FEATURE_NAMES) + AUX_NAMES
+FULL_FEATURE_NAMES: List[str] = (
+    KINEMATIC_NAMES + list(POSE_FEATURE_NAMES) + AUX_NAMES + LIDAR_NAMES + RADAR_NAMES
+)
 FULL_DIM = len(FULL_FEATURE_NAMES)
 
 KIN_DIM = len(KINEMATIC_NAMES)
 POSE_DIM = POSE_FEATURE_DIM
 AUX_DIM = len(AUX_NAMES)
+LIDAR_DIM = len(LIDAR_NAMES)
+RADAR_DIM = len(RADAR_NAMES)
 
-# Column slices into the full per-frame vector
+# Column slices into the full per-frame vector. kin/pose/aux keep their original
+# offsets so pre-existing 20-dim models remain valid; lidar/radar are appended.
 KIN_SLICE = slice(0, KIN_DIM)
 POSE_SLICE = slice(KIN_DIM, KIN_DIM + POSE_DIM)
-AUX_SLICE = slice(KIN_DIM + POSE_DIM, FULL_DIM)
+AUX_SLICE = slice(KIN_DIM + POSE_DIM, KIN_DIM + POSE_DIM + AUX_DIM)
+LIDAR_SLICE = slice(AUX_SLICE.stop, AUX_SLICE.stop + LIDAR_DIM)
+RADAR_SLICE = slice(LIDAR_SLICE.stop, LIDAR_SLICE.stop + RADAR_DIM)
 
 
-def active_columns(use_kinematics: bool, use_pose: bool, use_aux: bool = False) -> np.ndarray:
+def active_columns(
+    use_kinematics: bool,
+    use_pose: bool,
+    use_aux: bool = False,
+    use_lidar: bool = False,
+    use_radar: bool = False,
+) -> np.ndarray:
     """Return the column indices selected by the given feature toggles."""
     cols: List[int] = []
     if use_kinematics:
@@ -53,11 +83,16 @@ def active_columns(use_kinematics: bool, use_pose: bool, use_aux: bool = False) 
         cols += list(range(POSE_SLICE.start, POSE_SLICE.stop))
     if use_aux:
         cols += list(range(AUX_SLICE.start, AUX_SLICE.stop))
+    if use_lidar:
+        cols += list(range(LIDAR_SLICE.start, LIDAR_SLICE.stop))
+    if use_radar:
+        cols += list(range(RADAR_SLICE.start, RADAR_SLICE.stop))
     return np.array(cols, dtype=np.int64)
 
 
-def active_dim(use_kinematics: bool, use_pose: bool, use_aux: bool = False) -> int:
-    return int(len(active_columns(use_kinematics, use_pose, use_aux)))
+def active_dim(use_kinematics: bool, use_pose: bool, use_aux: bool = False,
+               use_lidar: bool = False, use_radar: bool = False) -> int:
+    return int(len(active_columns(use_kinematics, use_pose, use_aux, use_lidar, use_radar)))
 
 
 def compute_kinematics(

@@ -220,3 +220,43 @@ INTENT_HIDDEN_SIZE = 64
 
 # Probability threshold for "crossing" classification
 INTENT_THRESHOLD = 0.5
+
+# ─── nuScenes multimodal fusion (camera + LiDAR + radar) ──────────────────────
+# The nuScenes extension reuses the crossing-intent architecture but derives its
+# own label (nuScenes ships no crossing annotation): a pedestrian "crosses" when
+# it enters the ego-vehicle forward-path corridor within the prediction horizon.
+# See datasets/nuscenes_loader.py and datasets/build_nuscenes_features.py.
+
+NUSC_DATAROOT = os.environ.get("NUSC_DATAROOT", os.path.join(BASE_DIR, "..", "nuscenes"))
+# v1.0-mini | v1.0-trainval | v1.0-test. Override without editing:  set NUSC_VERSION=v1.0-trainval
+NUSC_VERSION = os.environ.get("NUSC_VERSION", "v1.0-mini")
+NUSC_MODEL_PATH = os.path.join(BASE_DIR, "checkpoints", "intent_model_nuscenes.npz")
+NUSC_CACHE_DIR = os.path.join(BASE_DIR, "checkpoints", "nusc_features")
+
+# 3D boxes are annotated at 2 Hz; we linearly interpolate the ego-frame track to
+# this rate so INTENT_OBS_LEN / INTENT_TTE (in steps) keep their ~seconds meaning.
+NUSC_TIMELINE_HZ = 10.0
+
+# Forward-path corridor that defines a "crossing" (ego frame: x fwd, y left).
+NUSC_CORRIDOR_HALF_WIDTH_M = 1.75   # |y| <= this ⇒ inside our lane/path
+NUSC_CORRIDOR_LOOKAHEAD_M = 30.0    # only count entries within x ∈ [0, this]
+NUSC_CORRIDOR_MIN_X_M = 0.0         # ignore peds behind the ego
+
+# Radar: aggregate returns within this radius (m, BEV) of the pedestrian centre.
+NUSC_RADAR_ASSOC_RADIUS_M = 2.5
+# LiDAR point count is read from the annotation (num_lidar_pts) — no blob load
+# needed; this cap only normalises the log-count channel.
+NUSC_LIDAR_PTS_NORM = 500.0
+
+# Pose sampling: "keyframe" holds the 2 Hz pose between keyframes (keyframes-only
+# download works); "dense" samples the nearest camera sweep (needs sweeps blobs).
+NUSC_POSE_SAMPLING = "keyframe"
+# Normalisers for the geometric channels (metres) so inputs stay ~unit scale.
+NUSC_RANGE_NORM_M = 60.0
+
+# nuScenes instances disappear for stretches (occlusion / out of FOV) and then
+# reappear with no annotations in between. Interpolating across such a gap would
+# fabricate motion, so any timeline step further than this (seconds) from the
+# nearest real keyframe is marked cross=-1 (excluded, never a prediction point).
+# Keyframes are ~0.5 s apart; 0.75 s tolerates normal jitter but rejects real gaps.
+NUSC_MAX_GAP_S = 0.75

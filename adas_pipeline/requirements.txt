@@ -9,3 +9,10 @@ python-multipart>=0.0.9
 av>=11.0.0
 rtmlib>=0.0.16
 onnxruntime>=1.17.0
+# nuScenes camera+LiDAR+radar fusion (install with --no-deps on numpy>=2 / py3.13,
+# then add the small deps below — see docs/nuscenes_fusion.md):
+#   pip install --no-deps nuscenes-devkit
+nuscenes-devkit>=1.1.0
+pyquaternion>=0.9.9
+shapely>=2.0
+cachetools>=5.0

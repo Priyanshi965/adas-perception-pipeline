@@ -168,6 +168,13 @@ async def index():
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+@app.get("/nuscenes", response_class=HTMLResponse)
+async def nuscenes_viewer():
+    """Bird's-eye-view player for the nuScenes camera+LiDAR+radar fusion model."""
+    html_path = STATIC_DIR / "nuscenes.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
     """Accept a video file, save it, and start the pipeline."""

@@ -19,7 +19,15 @@ Pedistrian_intent_detection/models/
 PIE/
 PIE_data/
 idd/
+nuscenes/
+nuscenes-trainval/
+downloads/
+*.tgz
+*.zip
+v1.0-mini.tgz
+v1.0-trainval_meta.tgz
 sample_vid.mp4
+adas_pipeline/checkpoints/nusc_features/
 
 # Pipeline internals
 adas_pipeline/checkpoints/
